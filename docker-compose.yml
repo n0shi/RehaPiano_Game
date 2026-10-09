@@ -3,7 +3,7 @@ services:
   web:
     build: .
     ports:
-      - "8080:80"
+      - "8082:80"
     restart: unless-stopped
     environment:
       - NODE_ENV=production
