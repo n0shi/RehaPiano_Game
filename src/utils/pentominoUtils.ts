@@ -66,6 +66,52 @@ export function canPlacePiece(
   return true;
 }
 
+// Kontrola len hraníc mriežky a kolízií (bez cieľového tvaru)
+export function fitsOnGrid(
+  grid: boolean[][],
+  pieceGrid: boolean[][],
+  row: number,
+  col: number
+): boolean {
+  const gridRows = grid.length;
+  const gridCols = grid[0]?.length || 0;
+  for (let r = 0; r < pieceGrid.length; r++) {
+    for (let c = 0; c < pieceGrid[r].length; c++) {
+      if (!pieceGrid[r][c]) continue;
+      const tr = row + r;
+      const tc = col + c;
+      if (tr < 0 || tr >= gridRows || tc < 0 || tc >= gridCols) return false;
+      if (grid[tr][tc]) return false;
+    }
+  }
+  return true;
+}
+
+// Po rotácii/flipe nájde najbližšiu platnú pozíciu (pri okraji sa kúsok posunie dovnútra)
+export function findNearestValidPosition(
+  grid: boolean[][],
+  pieceGrid: boolean[][],
+  row: number,
+  col: number,
+  maxShift = 5
+): { row: number; col: number } | null {
+  if (fitsOnGrid(grid, pieceGrid, row, col)) return { row, col };
+
+  let best: { row: number; col: number } | null = null;
+  let bestDist = Infinity;
+  for (let dr = -maxShift; dr <= maxShift; dr++) {
+    for (let dc = -maxShift; dc <= maxShift; dc++) {
+      const dist = dr * dr + dc * dc;
+      if (dist >= bestDist) continue;
+      if (fitsOnGrid(grid, pieceGrid, row + dr, col + dc)) {
+        best = { row: row + dr, col: col + dc };
+        bestDist = dist;
+      }
+    }
+  }
+  return best;
+}
+
 // Umiestnenie kúska na mriežku
 export function placePiece(
   grid: boolean[][],
