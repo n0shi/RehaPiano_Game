@@ -39,7 +39,6 @@ export function WebSocketStatus({ renderCalibrationButton, hideCalibrationButton
       try {
         const parsed =
           typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
-        //console.log("Prijaté dáta:", parsed);
         // Ak ide o vzorku zo senzora, znovu ju vysielame ako window event tak,
         // aby hry/komponenty mohli počúvať IMU/tensometer aktualizácie bez priameho
         // vlastníctva socketu.
@@ -53,6 +52,9 @@ export function WebSocketStatus({ renderCalibrationButton, hideCalibrationButton
             const evtDetail = {
               adc: parsed.adc || [],
               imu: parsed.imu || { gyroX: 0, gyroY: 0, gyroZ: 0 },
+              // ktorá ruka (zariadenie) vzorku poslala: 'left' | 'right' (pre režim dvoch rúk)
+              hand: parsed.hand,
+              port: parsed.port,
             };
             window.dispatchEvent(
               new CustomEvent('imu-sample', { detail: evtDetail }),

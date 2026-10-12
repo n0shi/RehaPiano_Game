@@ -3,6 +3,11 @@ import { Hand, X } from 'lucide-react';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { useModal } from '../context/ModalContext';
+import { normalizeAdc } from '../utils/imuNormalize';
+
+// TEST: klávesy Q W E R T fungujú ako prepínače (netreba držať všetkých 5 naraz).
+// false = pôvodné správanie (treba držať všetky klávesy súčasne)
+const KEYBOARD_STICKY_FINGERS = true;
 
 interface CalibrationModalProps {
   useLeftHand?: boolean;
@@ -10,8 +15,11 @@ interface CalibrationModalProps {
 
 type Quat = { w: number; x: number; y: number; z: number };
 
-export function CalibrationModal({ useLeftHand = false }: CalibrationModalProps) {
-  const { showCalibrationModal, calibrate, hideCalibrationModal, isCalibrated } = useCalibration();
+export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: CalibrationModalProps) {
+  const { showCalibrationModal, calibrate, hideCalibrationModal, isCalibrated, handMode, calibratingHand } = useCalibration();
+  const dual = handMode === 'dual';
+  // V režime dvoch rúk sa kalibruje najprv ľavá, potom pravá – usporiadanie prstov podľa aktuálnej ruky
+  const useLeftHand = dual ? calibratingHand === 'left' : useLeftHandProp;
   const cfg = useConfig();
   const { enterModal, exitModal } = useModal();
   const wsConnected = typeof window !== 'undefined' && !!(window as any).__wsConnected;
@@ -43,7 +51,15 @@ export function CalibrationModal({ useLeftHand = false }: CalibrationModalProps)
     const handleKeyDown = (e: KeyboardEvent) => {
       const finger = keyToFinger[e.key];
       if (finger !== undefined) {
-        pressedKeysRef.current.add(e.key.toLowerCase());
+        const k = e.key.toLowerCase();
+        if (KEYBOARD_STICKY_FINGERS) {
+          // Režim "prepínač": klávesa raz = prst stlačený, ešte raz = uvoľnený
+          if (e.repeat) return;
+          if (pressedKeysRef.current.has(k)) pressedKeysRef.current.delete(k);
+          else pressedKeysRef.current.add(k);
+        } else {
+          pressedKeysRef.current.add(k);
+        }
         // kombinovať IMU a klávesnicu
         const kbStates = [
           pressedKeysRef.current.has('q'),
@@ -58,6 +74,7 @@ export function CalibrationModal({ useLeftHand = false }: CalibrationModalProps)
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      if (KEYBOARD_STICKY_FINGERS) return; // v režime prepínača keyup nič neuvoľňuje
       pressedKeysRef.current.delete(e.key.toLowerCase());
       const kbStates = [
         pressedKeysRef.current.has('q'),
@@ -93,6 +110,8 @@ export function CalibrationModal({ useLeftHand = false }: CalibrationModalProps)
     const handleImuSample = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
+      // Dve ruky: reaguj len na vzorky ruky, ktorá sa práve kalibruje
+      if (dual && detail.hand !== calibratingHand) return;
 
       const adc: number[] = Array.isArray(detail.adc) ? detail.adc : [];
       const imu = detail.imu || {};
@@ -116,7 +135,7 @@ export function CalibrationModal({ useLeftHand = false }: CalibrationModalProps)
 
       const newStates = fingers.map((val) => {
         const raw = Math.abs(val);
-        const norm = raw / 128;
+        const norm = normalizeAdc(raw);
         return raw > defaultRawThr || norm > defaultNormThr;
       });
 
@@ -135,7 +154,7 @@ export function CalibrationModal({ useLeftHand = false }: CalibrationModalProps)
 
     window.addEventListener('imu-sample', handleImuSample);
     return () => window.removeEventListener('imu-sample', handleImuSample);
-  }, [showCalibrationModal, useLeftHand, cfg, wsConnected]);
+  }, [showCalibrationModal, useLeftHand, cfg, wsConnected, dual, calibratingHand]);
 
   // Skontrolovať či sú všetky prsty stlačené a podržať pre kalibráciu
   useEffect(() => {
@@ -184,6 +203,17 @@ export function CalibrationModal({ useLeftHand = false }: CalibrationModalProps)
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, [fingerStates, showCalibrationModal, lastQuat, calibrate, wsConnected]);
+
+  // Dve ruky: pri prechode na ďalšiu ruku vyčisti stav (prsty, progres, naposledy videný quaternion)
+  useEffect(() => {
+    if (!dual) return;
+    calibrationDoneRef.current = false;
+    allPressedStartRef.current = null;
+    imuFingerStatesRef.current = [false, false, false, false, false];
+    setFingerStates([false, false, false, false, false]);
+    setAllPressedFor(0);
+    setLastQuat(null);
+  }, [dual, calibratingHand]);
 
   // Resetovať stavy prstov keď sa modal zatvorí
   useEffect(() => {
@@ -267,7 +297,7 @@ export function CalibrationModal({ useLeftHand = false }: CalibrationModalProps)
           </div>
 
           <h2 className="text-3xl font-extrabold text-slate-900 mb-3">
-            Kalibrácia senzora
+            Kalibrácia senzora{dual && calibratingHand ? ` – ${calibratingHand === 'left' ? 'ĽAVÁ ruka (1/2)' : 'PRAVÁ ruka (2/2)'}` : ''}
           </h2>
           <p className="text-lg text-slate-600 mb-8">
             Pre kalibráciu stlačte <strong>všetky prsty naraz</strong> a podržte ich 1 sekundu.
