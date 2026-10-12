@@ -24,6 +24,7 @@ import { useConfig } from '../config/ConfigContext';
 import { useCalibration } from '../context/CalibrationContext';
 import { CalibrationModal } from './CalibrationModal';
 import type { AppConfig } from '../config/config';
+import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
 
 interface GameBoardProps {
   useLeftHand: boolean;
@@ -675,7 +676,6 @@ export function GameBoard({
       imuCtrlRef.current.gridSize = cfg.GRID_WIDTH;
       // Tuning to reduce perceived movement speed / make smoothing stronger
       imuCtrlRef.current.gridSmoothAlpha = 0.06; // smoother, slower-to-react
-      imuCtrlRef.current.gridChangeThreshold = 0.85; // require closer to target before snapping
       imuCtrlRef.current.posAlpha = 0.18; // slower pos response
       imuCtrlRef.current.precisionScale = 1.2; // reduce precision amplification when gripping
     }
@@ -702,11 +702,12 @@ export function GameBoard({
         // Spracovanie pomocou IMU controllera
         const out = imuCtrlRef.current!.update(sample, dt);
 
+        const imuN = normalizeImuSample(sample.imu);
         // Aktualizácia debug dát pre kalibráciu
         setImuDebug({
-          pitch: Math.round((sample.imu.pitch ?? 0) / 16 * 10) / 10,
-          roll: Math.round((sample.imu.roll ?? 0) / 16 * 10) / 10,
-          yaw: Math.round((sample.imu.yaw ?? 0) / 16 * 10) / 10,
+          pitch: Math.round(imuN.pitchDeg * 10) / 10,
+          roll: Math.round(imuN.rollDeg * 10) / 10,
+          yaw: Math.round(imuN.yawDeg * 10) / 10,
           gyro: out.gyro,
           grip: out.grip,
           quat: sample.imu.quatW !== undefined ? {
@@ -735,7 +736,7 @@ export function GameBoard({
               ? calibrations[i].threshold
               : defaultRawThr;
           const raw = Math.abs(fingers[i] ?? 0);
-          const norm = raw / 128;
+          const norm = normalizeAdc(raw);
           const isPressed = raw > thr || norm > defaultNormThr;
           if (isPressed) pressedCount++;
         }
@@ -751,7 +752,7 @@ export function GameBoard({
             ? calibrations[activeIdx].threshold
             : defaultRawThr;
         const activeRaw = Math.abs(activeVal);
-        const activeNorm = activeRaw / 128;
+        const activeNorm = normalizeAdc(activeRaw);
         const singlePressed = !grab && (activeRaw > activeThr || activeNorm > defaultNormThr);
 
         // Aktualizovať UI stavy

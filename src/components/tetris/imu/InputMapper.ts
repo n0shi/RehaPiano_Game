@@ -133,8 +133,8 @@ export class InputMapper {
 
     this.dropCtrl = new AccelDropController({
       enabled: config.dropEnable ?? true,
-      softThreshold: config.dropSoft ?? -4,
-      hardThreshold: config.dropHard ?? -8,
+      softThreshold: config.dropSoft ?? -30,
+      hardThreshold: config.dropHard ?? -58,
       alpha: config.dropAlpha ?? 0.18,
       armThreshold: config.dropArm ?? 15.0,
     });

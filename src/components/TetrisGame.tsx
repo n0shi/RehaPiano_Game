@@ -11,6 +11,7 @@ import { useCalibration } from '../context/CalibrationContext';
 import { CalibrationModal } from './CalibrationModal';
 import { ModalBackdrop } from './ModalBackdrop';
 import { Blocks } from 'lucide-react';
+import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
 
 // Komponent modálneho okna pre koniec hry
 interface TetrisFinishedModalProps {
@@ -307,6 +308,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       dropEnable: true,
       dropSoft: -30,
       dropHard: -58,
+      dropArm: 15,
       dropAlpha: 0.18,
     });
 
@@ -462,7 +464,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       let pressedCount = 0;
       for (let i = 0; i < fingers.length; i++) {
         const raw = Math.abs(fingers[i] ?? 0);
-        const norm = raw / 128;
+        const norm = normalizeAdc(raw);
         if (raw > defaultRawThr || norm > defaultNormThr) pressedCount++;
       }
       const manualGrip = pressedCount === 5;
@@ -627,11 +629,12 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
         gripStartPieceYRef.current = null;
       }
 
+      const imuN = normalizeImuSample(sample.imu);
       // Aktualizovať stav debug overlay (pre kalibráciu)
       setImuDebug({
-        pitch: Math.round((sample.imu.pitch ?? 0) / 16 * 10) / 10,
-        roll: Math.round((sample.imu.roll ?? 0) / 16 * 10) / 10,
-        yaw: Math.round((sample.imu.yaw ?? 0) / 16 * 10) / 10,
+        pitch: Math.round(imuN.pitchDeg * 10) / 10,
+        roll: Math.round(imuN.rollDeg * 10) / 10,
+        yaw: Math.round(imuN.yawDeg * 10) / 10,
         gyro: out.gyro,
         quat: sample.imu.quatW !== undefined ? {
           w: sample.imu.quatW ?? 0,

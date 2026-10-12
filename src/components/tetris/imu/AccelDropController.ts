@@ -2,6 +2,7 @@
 // Detekcia pitch pre soft/hard drop
 
 import { imuExtractVector } from './utils';
+import { scaleAngle, scaleGrav } from '../../../utils/imuNormalize';
 
 export const BTN_DOWN = 'DOWN';
 export const BTN_DROP = 'DROP';
@@ -54,7 +55,7 @@ export class AccelDropController {
     // Try direct pitch
     if (typeof imu === 'object' && 'pitch' in imu) {
       try {
-        return parseFloat(imu.pitch) / 16.0;
+        return scaleAngle(imu.pitch);
       } catch {
         // continue
       }
@@ -79,9 +80,9 @@ export class AccelDropController {
         gz !== undefined
       ) {
         try {
-          const gxf = parseFloat(gx) / 100.0;
-          const gyf = parseFloat(gy) / 100.0;
-          const gzf = parseFloat(gz) / 100.0;
+          const gxf = scaleGrav(gx);
+          const gyf = scaleGrav(gy);
+          const gzf = scaleGrav(gz);
           return (
             Math.atan2(-gxf, Math.sqrt(gyf * gyf + gzf * gzf)) * (180 / Math.PI)
           );

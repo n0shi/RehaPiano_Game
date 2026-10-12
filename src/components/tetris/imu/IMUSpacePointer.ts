@@ -10,6 +10,7 @@ import {
   type Quaternion,
   type Vec3,
 } from './quaternion';
+import { scaleGrav } from '../../../utils/imuNormalize';
 
 export class IMUSpacePointer {
   // EMA & filtering
@@ -137,14 +138,14 @@ export class IMUSpacePointer {
       ay = parseFloat(imu.linAccY || 0) * this.linaccScale;
       az = parseFloat(imu.linAccZ || 0) * this.linaccScale;
     } else if (this.source === 'accminusgrav') {
-      ax = parseFloat(imu.accX || 0) - parseFloat(imu.gravX || 0) / 100;
-      ay = parseFloat(imu.accY || 0) - parseFloat(imu.gravY || 0) / 100;
-      az = parseFloat(imu.accZ || 0) - parseFloat(imu.gravZ || 0) / 100;
+      ax = parseFloat(imu.accX || 0) - scaleGrav(imu.gravX);
+      ay = parseFloat(imu.accY || 0) - scaleGrav(imu.gravY);
+      az = parseFloat(imu.accZ || 0) - scaleGrav(imu.gravZ);
     } else {
       // gravdelta
-      const gx = parseFloat(imu.gravX || 0) / 100;
-      const gy = parseFloat(imu.gravY || 0) / 100;
-      const gz = parseFloat(imu.gravZ || 0) / 100;
+      const gx = scaleGrav(imu.gravX);
+      const gy = scaleGrav(imu.gravY);
+      const gz = scaleGrav(imu.gravZ);
 
       if (this.prevG === null || dt <= 0) {
         this.prevG = [gx, gy, gz];

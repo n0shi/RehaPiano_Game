@@ -1,5 +1,6 @@
 // ==================== IMU UTILITIES ====================
 // Helper funkcie pre extrahovanie IMU dát
+import { scaleGyro } from '../../../utils/imuNormalize';
 
 export function imuExtractAxis(imu: any, axis: 'x' | 'y' | 'z'): number | null {
   if (!imu || typeof imu !== 'object') return null;
@@ -14,7 +15,7 @@ export function imuExtractAxis(imu: any, axis: 'x' | 'y' | 'z'): number | null {
   const camel = camelMap[a];
   if (camel in imu) {
     try {
-      return parseFloat(imu[camel]) / 16.0;
+      return scaleGyro(imu[camel]);
     } catch {
       return null;
     }
