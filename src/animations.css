@@ -104,3 +104,32 @@
 .animate-energy-flow {
   animation: energyFlow 2s ease-in-out infinite;
 }
+
+/* Plynulý prevrat kúska: začína ako zrkadlový obraz (= starý tvar) a otočí sa do nového */
+@keyframes piece-flip {
+  from { transform: perspective(700px) rotateY(180deg); }
+  to   { transform: perspective(700px) rotateY(0deg); }
+}
+
+/* === Kurzor rukavice v menu (MenuCursor) === */
+.imu-menu-cursor {
+  position: fixed; left: 0; top: 0; z-index: 9999;
+  width: 0; height: 0; pointer-events: none;
+  transition: opacity 0.2s;
+}
+.imu-menu-cursor__ring {
+  position: absolute; left: -22px; top: -22px; width: 44px; height: 44px;
+  border: 4px solid #2563eb; border-radius: 9999px; background: rgba(37, 99, 235, 0.12);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.9), 0 4px 14px rgba(0, 0, 0, 0.25);
+  transition: transform 0.12s, background 0.12s, border-color 0.12s;
+}
+.imu-menu-cursor__dot {
+  position: absolute; left: -4px; top: -4px; width: 8px; height: 8px;
+  border-radius: 9999px; background: #2563eb;
+}
+.imu-menu-cursor[data-grip='true'] .imu-menu-cursor__ring {
+  transform: scale(0.6); background: rgba(22, 163, 74, 0.35); border-color: #16a34a;
+}
+[data-imu-hover] {
+  outline: 4px solid #2563eb; outline-offset: 3px;
+}
