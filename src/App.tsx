@@ -7,6 +7,8 @@ import { TetrisGame } from './components/TetrisGame';
 import { Puzzle, Shapes, Hand, Blocks } from 'lucide-react';
 import { Target, Settings, Plus, Minus } from 'lucide-react';
 import { WebSocketStatus } from './components/WebSocketStatus';
+import { MenuCursor } from './components/MenuCursor';
+import { ShapeTraceModal } from './components/ShapeTraceModal';
 import {
   FingerCalibration,
   LEFT_HAND_KEYS,
@@ -27,7 +29,8 @@ export default function App() {
   const [gameType, setGameType] = useState<GameType>('original');
   const [calibrations, setCalibrations] = useState<FingerCalibration[]>([]);
   const cfg = useConfig();
-  const { setActiveHand, isCalibrated } = useCalibration();
+  const { setActiveHand, isCalibrated, startDualMode, handMode } = useCalibration();
+  const dualHands = handMode === 'dual';
   // Hodnota slidera pre počet úrovní. Predvolene zvolíme stred konfigurovaného maxima.
   // Ak používateľ posunie slider, neprepíšeme jeho voľbu pri opätovnom načítaní configu —
   // stav sledujeme cez `userAdjusted`.
@@ -37,6 +40,7 @@ export default function App() {
     return Math.ceil((Math.max(1, max) + 1) / 2);
   });
   const [userAdjusted, setUserAdjusted] = useState(false);
+  const [showShapeTrace, setShowShapeTrace] = useState(false);
 
   useEffect(() => {
     if (!cfg) return;
@@ -69,12 +73,16 @@ export default function App() {
         setUseLeftHand(false);
         setActiveHand('right');
         setScreen('gameSelection');
+      } else if (key === 'd') {
+        setUseLeftHand(false);
+        startDualMode();
+        setScreen('gameSelection');
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [screen, setActiveHand]);
+  }, [screen, setActiveHand, startDualMode]);
 
   // Klávesové skratky pre výber hry
   useEffect(() => {
@@ -83,7 +91,7 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
 
-      if (key === 'l') {
+      if (key === 'l' && !dualHands) {
         // Pattern / original
         setGameType('original');
         setScreen('game');
@@ -96,11 +104,18 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [screen]);
+  }, [screen, dualHands]);
 
   const handleHandSelection = (leftHand: boolean) => {
     setUseLeftHand(leftHand);
     setActiveHand(leftHand ? 'left' : 'right');
+    setScreen('gameSelection');
+  };
+
+  // Obe ruky naraz (Pentomino): kalibrujú sa obe ruky, ovládanie robia spolu
+  const handleDualSelection = () => {
+    setUseLeftHand(false);
+    startDualMode();
     setScreen('gameSelection');
   };
 
@@ -124,7 +139,7 @@ export default function App() {
 
   // Inline GameMenu component (user-provided design)
   type HandType = 'left' | 'right';
-  function GameMenu({ onSelectGame, hand, onChangeSettings }: { onSelectGame: (game: 'pattern' | 'pentominoes' | 'tetris', maxLevels: number) => void; hand: HandType; onChangeSettings: () => void; }) {
+  function GameMenu({ onSelectGame, hand, onChangeSettings, dual = false }: { onSelectGame: (game: 'pattern' | 'pentominoes' | 'tetris', maxLevels: number) => void; hand: HandType; onChangeSettings: () => void; dual?: boolean; }) {
     const handEmoji = hand === 'left' ? '🤚' : '🤚';
     // Separate level selectors per card so adjusting one doesn't affect the other
     const [patternLevelIndex, setPatternLevelIndex] = useState<number>(1);
@@ -180,7 +195,7 @@ export default function App() {
                   <div>
                     <p className="text-slate-600 text-md">Aktívna ruka</p>
                     <p className="text-slate-800 flex items-center gap-2 text-lg font-bold">
-                      {hand === 'left' ? 'Ľavá' : 'Pravá'}
+                      {dual ? 'Obe ruky' : hand === 'left' ? 'Ľavá' : 'Pravá'}
                     </p>
                   </div>
                 </div>
@@ -196,7 +211,9 @@ export default function App() {
             </div>
             <button
               onClick={() => onSelectGame('pattern', levelOptions[patternLevelIndex])}
-              className="bg-white rounded-2xl shadow-xl p-8 hover:shadow-2xl transition-all hover:scale-105 text-left group"
+              disabled={dual}
+              title={dual ? 'Režim dvoch rúk je zatiaľ len pre Pentomino' : undefined}
+              className={`bg-white rounded-2xl shadow-xl p-8 hover:shadow-2xl transition-all hover:scale-105 text-left group ${dual ? 'opacity-40 pointer-events-none' : ''}`}
             >
               <div className="bg-blue-100 w-16 h-16 rounded-xl flex items-center justify-center mb-6 group-hover:bg-blue-200 transition-colors">
                 <Puzzle className="w-8 h-8 text-blue-600" />
@@ -320,7 +337,10 @@ export default function App() {
               </div>
             </button>
 
-            <div className="bg-white rounded-2xl shadow-xl p-8 text-left hover:shadow-2xl transition-all hover:scale-105">
+            <div
+              className={`bg-white rounded-2xl shadow-xl p-8 text-left hover:shadow-2xl transition-all hover:scale-105 ${dual ? 'opacity-40 pointer-events-none' : ''}`}
+              title={dual ? 'Režim dvoch rúk je zatiaľ len pre Pentomino' : undefined}
+            >
               <div className="bg-green-100 hover:bg-green-200 w-16 h-16 rounded-xl flex items-center justify-center mb-6">
                 <Blocks className="w-8 h-8 text-green-600" />
               </div>
@@ -388,6 +408,23 @@ export default function App() {
         showCalibratedLabel={screen === 'gameSelection'}
       />
 
+      {(screen === 'menu' || screen === 'gameSelection') && !showShapeTrace && (
+        <MenuCursor screen={screen} leftHand={useLeftHand} />
+      )}
+
+      {(screen === 'menu' || screen === 'gameSelection') && !showShapeTrace && (
+        <button
+          onClick={() => setShowShapeTrace(true)}
+          className="fixed bottom-4 left-4 z-40 px-4 py-2 rounded-xl bg-white/90 hover:bg-white shadow-md text-slate-700 font-medium"
+        >
+          ✏️ Skúška kreslenia
+        </button>
+      )}
+
+      {showShapeTrace && (
+        <ShapeTraceModal leftHand={useLeftHand} onClose={() => setShowShapeTrace(false)} />
+      )}
+
       {screen === 'menu' && (
         <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 p-4 overflow-auto" style={{ fontFamily: '\'Poppins\', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial' }}>
           <div className="max-w-4xl w-full">
@@ -408,7 +445,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-4">
                 {/* Left Hand */}
                 <button
                   onClick={() => handleHandSelection(true)}
@@ -434,10 +471,22 @@ export default function App() {
                     </div>
                   </div>
                 </button>
+
+                {/* Both Hands (Pentomino) */}
+                <button
+                  onClick={handleDualSelection}
+                  className="relative p-8 rounded-2xl border-2 border-slate-200 hover:border-purple-300 hover:shadow-md transition-all hover:scale-105"
+                >
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="text-6xl">🙌</div>
+                    <div className="text-center">
+                      <p className="text-xl font-semibold text-slate-800 mb-1">OBE RUKY</p>
+                      <p className="text-sm text-slate-500">len Pentomino</p>
+                    </div>
+                  </div>
+                </button>
               </div>
             </div>
-
-            {/* Slider for level count removed per UX request */}
 
             {/* Info Section */}
             <div className="mt-8 bg-blue-50 rounded-2xl p-6">
@@ -466,6 +515,7 @@ export default function App() {
       {screen === 'gameSelection' && (
         <GameMenu
           hand={useLeftHand ? 'left' : 'right'}
+          dual={dualHands}
           onChangeSettings={() => setScreen('menu')}
           onSelectGame={(game, maxLevels) => {
             if (game === 'pattern') setGameType('original');
@@ -490,6 +540,7 @@ export default function App() {
 
       {screen === 'game' && gameType === 'pentomino' && (
         <PentominoGame
+          dualHands={dualHands}
           useLeftHand={useLeftHand}
           fingerKeys={fingerKeys}
           fingerNames={fingerNames}
