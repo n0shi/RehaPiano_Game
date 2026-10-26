@@ -45,3 +45,7 @@ lerna-debug.log*
 # package-lock.json
 # yarn.lock
 # pnpm-lock.yaml
+
+# записи рукавички та кеш Python
+tools/recordings/
+__pycache__/
