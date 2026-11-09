@@ -12,6 +12,7 @@ import { CalibrationModal } from './CalibrationModal';
 import { ModalBackdrop } from './ModalBackdrop';
 import { Blocks } from 'lucide-react';
 import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
+import type { FingerState } from '../utils/fingerCalibration';
 
 // Komponent modálneho okna pre koniec hry
 interface TetrisFinishedModalProps {
@@ -462,7 +463,9 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       const defaultNormThr = (cfg as any)?.TENSOMETER_NORM_THRESHOLD ?? 12;
 
       let pressedCount = 0;
-      for (let i = 0; i < fingers.length; i++) {
+      const fs = detail.fingers as FingerState | undefined;
+      if (fs?.calibrated) pressedCount = fs.count; // kalibrované prahy prstov človeka
+      else for (let i = 0; i < fingers.length; i++) {
         const raw = Math.abs(fingers[i] ?? 0);
         const norm = normalizeAdc(raw);
         if (raw > defaultRawThr || norm > defaultNormThr) pressedCount++;

@@ -25,6 +25,7 @@ import { useCalibration } from '../context/CalibrationContext';
 import { CalibrationModal } from './CalibrationModal';
 import type { AppConfig } from '../config/config';
 import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
+import type { FingerState } from '../utils/fingerCalibration';
 
 interface GameBoardProps {
   useLeftHand: boolean;
@@ -728,9 +729,14 @@ export function GameBoard({
         const defaultRawThr = (cfg as any).TENSOMETER_RAW_THRESHOLD ?? 2000;
         const defaultNormThr = (cfg as any).TENSOMETER_NORM_THRESHOLD ?? 12;
 
+        // Kalibrácia prstov človeka (okno Kalibrácia senzora): ak existuje, nahrádza pevné prahy aj prahy z úvodnej kalibrácie
+        const fs = detail.fingers as FingerState | undefined;
+        const calPressed = fs?.calibrated ? (useLeftHand ? fs.pressed : fs.pressed.slice().reverse()) : null;
+
         // Spočítať stlačené prsty
         let pressedCount = 0;
-        for (let i = 0; i < fingers.length; i++) {
+        if (calPressed) pressedCount = calPressed.filter(Boolean).length;
+        else for (let i = 0; i < fingers.length; i++) {
           const thr =
             calibrations && calibrations[i] && calibrations[i].threshold
               ? calibrations[i].threshold
@@ -753,7 +759,7 @@ export function GameBoard({
             : defaultRawThr;
         const activeRaw = Math.abs(activeVal);
         const activeNorm = normalizeAdc(activeRaw);
-        const singlePressed = !grab && (activeRaw > activeThr || activeNorm > defaultNormThr);
+        const singlePressed = !grab && (calPressed ? !!calPressed[activeIdx] : (activeRaw > activeThr || activeNorm > defaultNormThr));
 
         // Aktualizovať UI stavy
         setLeftPressed(grab);
