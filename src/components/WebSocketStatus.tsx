@@ -3,6 +3,7 @@ import { Badge } from './ui/badge';
 import { useConfig } from '../config/ConfigContext';
 import { useCalibration } from '../context/CalibrationContext';
 import { useModal } from '../context/ModalContext';
+import { detectFingers } from '../utils/fingerCalibration';
 
 interface WebSocketStatusProps {
   renderCalibrationButton?: (connected: boolean) => ReactNode;
@@ -55,6 +56,8 @@ export function WebSocketStatus({ renderCalibrationButton, hideCalibrationButton
               // ktorá ruka (zariadenie) vzorku poslala: 'left' | 'right' (pre režim dvoch rúk)
               hand: parsed.hand,
               port: parsed.port,
+              // stav prstov podľa kalibrácie človeka (alebo pôvodného pevného prahu); počíta sa raz na vzorku kvôli hysteréze a driftu
+              fingers: detectFingers(parsed.adc, parsed.hand, cfg),
             };
             window.dispatchEvent(
               new CustomEvent('imu-sample', { detail: evtDetail }),
