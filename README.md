@@ -28,6 +28,12 @@
 - [pentominoShapes.ts](src/data/pentominoShapes.ts)
    - Definícia tvarov v hre "Pentomino"
 
+- [cursorInput.ts](src/utils/cursorInput.ts)
+   - Kurzorové gestá rukavice (port z Tangram): stisk > 200 ms zachytí blok pod kurzorom, gyro Z ho plynulo otáča, kývnutie zápästia ho prevráti. Bez Reactu/DOM
+
+- [pieceManip.ts](src/utils/pieceManip.ts)
+   - Správanie bloku pri ovládaní kurzorom a klávesmi R/E/F: ťahanie v desatinných bunkách, plynulé otáčanie, animovaný prevrat, prichytenie na mriežku po pustení (voľné miesto do 3 buniek, inak návrat)
+
 ---
 #### Konfiguračný súbor
 - [configuration.json](public/configuration.json)
