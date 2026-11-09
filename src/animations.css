@@ -116,6 +116,7 @@
   position: fixed; left: 0; top: 0; z-index: 9999;
   width: 0; height: 0; pointer-events: none;
   transition: opacity 0.2s;
+  will-change: transform; /* vlastná vrstva: posun kurzora neprekresľuje stránku */
 }
 .imu-menu-cursor__ring {
   position: absolute; left: -22px; top: -22px; width: 44px; height: 44px;
@@ -130,6 +131,40 @@
 .imu-menu-cursor[data-grip='true'] .imu-menu-cursor__ring {
   transform: scale(0.6); background: rgba(22, 163, 74, 0.35); border-color: #16a34a;
 }
+.imu-menu-cursor__calib {
+  position: absolute; left: -34px; top: -34px; width: 68px; height: 68px; border-radius: 9999px;
+  background: conic-gradient(#f59e0b calc(var(--calib, 0) * 1turn), transparent 0);
+  -webkit-mask: radial-gradient(circle, transparent 28px, #000 29px); mask: radial-gradient(circle, transparent 28px, #000 29px);
+  opacity: 0; transition: opacity 0.1s;
+}
+.imu-menu-cursor[data-calibrating='true'] .imu-menu-cursor__calib { opacity: 1; }
+.imu-menu-cursor[data-calib-done='true'] .imu-menu-cursor__ring {
+  transform: scale(1.4); background: rgba(245, 158, 11, 0.35); border-color: #f59e0b;
+}
 [data-imu-hover] {
   outline: 4px solid #2563eb; outline-offset: 3px;
 }
+
+/* Vybraný blok v Pentamine: hrubší obrys a pulzujúca žiara, aby bol na prvý pohľad zrejmý */
+@keyframes piece-selected {
+  0%, 100% {
+    filter: drop-shadow(3px 0 0 #17647d) drop-shadow(-3px 0 0 #17647d) drop-shadow(0 3px 0 #17647d) drop-shadow(0 -3px 0 #17647d)
+      drop-shadow(0 0 8px rgba(255, 153, 0, 0.7));
+  }
+  50% {
+    filter: drop-shadow(3px 0 0 #17647d) drop-shadow(-3px 0 0 #17647d) drop-shadow(0 3px 0 #17647d) drop-shadow(0 -3px 0 #17647d)
+      drop-shadow(0 0 18px rgba(255, 153, 0, 1));
+  }
+}
+.piece-selected-pulse {
+  /* Bez nekonečnej animácie: animovaný filter s 5 tieňmi sa prekresľoval každý snímok a spomaľoval hru (kurzor/blok lagovali). */
+  filter: drop-shadow(3px 0 0 #17647d) drop-shadow(-3px 0 0 #17647d) drop-shadow(0 3px 0 #17647d) drop-shadow(0 -3px 0 #17647d)
+    drop-shadow(0 0 12px rgba(255, 153, 0, 0.85));
+  z-index: 20;
+}
+
+/* Kurzor rukavice v Pentomine (poloha sa nastavuje priamo z JS) */
+.pentomino-glove-cursor circle,
+.pentomino-glove-cursor path { stroke: #17647d; }
+.pentomino-glove-cursor[data-grip='true'] circle,
+.pentomino-glove-cursor[data-grip='true'] path { stroke: #FF9900; }
