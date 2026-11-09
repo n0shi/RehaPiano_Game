@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import SingleIMUController, { TILT_ROTATION_RIGHT_DEG, SHEAR_UP_RIGHT_HAND, SHEAR_RIGHT_RIGHT_HAND } from '../utils/imuController';
+import SingleIMUController from '../utils/imuController';
+import { applyAxisCorr } from '../utils/axisCalibration';
 import { useConfig } from '../config/ConfigContext';
 import { useCalibration } from '../context/CalibrationContext';
 import { CalibrationModal } from './CalibrationModal';
@@ -25,38 +26,68 @@ import {
 import { FingerCalibration } from '../types/game';
 import '../animations.css';
 import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
+import { pressedCountOf } from '../utils/fingerCalibration';
 import { fuseSigned, DUAL_LEFT_GYRO_SIGN } from '../utils/dualHands';
-import { MOVE_START_CELLS, MOVE_STEP_MS, pieceStep } from '../utils/pieceMovement';
+import { CursorGripInput } from '../utils/cursorInput';
+import { PieceManipulator, type ManipSnapshot, type CommitInfo } from '../utils/pieceManip';
 
-// Zmena aktívneho bloku zmachom ruky (flick-up = ďalší, flick-down = predchádzajúci)
-const FLICK_SWITCH_ENABLED = true;
-
-// TEST: plynulý 3D prevrat kúska pri flipe (false = pôvodné okamžité prevrátenie)
-// Rotácia zápästím: kumulovaný uhol (gyro Z) sa zobrazuje plynulo, prichytenie na 90° po pustení/pauze.
-const TWIST_DIFFICULTY = 1.5;       // ťažkosť: nakumulovaný uhol sa delí týmto číslom (väčšie = pomalšie otáčanie)
-const TWIST_SAMPLE_MS = 100;      // akumuluj len raz za tento interval (nie každú vzorku)
-const TWIST_COMMIT_IDLE_MS = 700;  // pauza v otáčaní zápästím (ms), po ktorej sa kúsok prichytí na 90°
-// Flip = kyvnutie zápästia K SEBE / OD SEBA. Senzor je naklonený, takže sa to rozloží na gyro X a Y s OPAČNÝM znamienkom
-// (namerané: x~92, y~101, korelácia -0.96, z~24). Flipová os je preto diagonála (gy - gx)/√2.
-const FLIP_STEP_DEG = 70;         // flip až keď sa ruka okolo osi X reálne otočí o toľko stupňov (akumulácia, nie jednorazový prah)
-const FLIP_DEADZONE_DPS = 50;     // gyro X pod touto rýchlosťou sa nezapočítava (šum má std ~5-6 °/s)
-const FLIP_DOMINANCE = 1.6;       // |flipový gyro| musí byť aspoň toľkokrát väčší ako obe ostatné osi (inak je to iný pohyb)
-const FLIP_IDLE_RESET_MS = 400;   // pauza v pohybe po ktorej sa nakumulovaný uhol zahodí
-const HAND_POS_GAIN = 1.2;          // zosilenie náklonu ruky -> poloha (rovnako ako DRAW_GAIN v kreslení)
-const TWIST_QUIET_MS = 350;       // po otočení zápästia (gyro Z) chvíľu ignoruj posun ruky spôsobený náklonom
-const TWIST_DEADZONE_DPS = 100;   // ignoruj šum/drift gyra pod touto rýchlosťou (°/s); namerané: otočenie ~250-600, posun ruky max ~80
-const TWIST_DOMINANCE = 2;        // |gyro Z| musí byť aspoň toľkokrát väčší ako gyro X aj Y (posun ruky/náklon dáva X,Y; otočenie Z)
-const SMOOTH_FLIP_ENABLED = true;
-const SMOOTH_FLIP_MS = 450;
-
-// TEST: plynulá rotácia klávesom. Podržaný R = otáča doprava, E = doľava (po krokoch za snímku).
-// Po pustení sa kúsok "prichytí" na najbližší násobok 90° (pod 45° späť, nad 45° na 90°).
-// false = pôvodná rotácia o 90° naraz.
-const SMOOTH_ROTATE_ENABLED = true;
-const ROTATE_SPEED_DPS = 180;     // rýchlosť otáčania pri držaní (°/s; ~3° na snímku pri 60 fps)
-const ROTATE_SETTLE_FACTOR = 2;   // o koľko rýchlejšie dobieha do cieľového uhla po pustení
-const ROTATE_TAP_MS = 150;        // krátke ťuknutie kratšie ako toto = rovno celých 90° (0 = vypnúť)
-const ROTATE_EASE_MS = 120;       // dorovnanie posunu stredu pri nepravidelných tvaroch
+// Ovládanie rukavicou je kurzorové (port z Tangram): otvorená dlaň hýbe kurzorom, plný stisk > 200 ms zachytí blok pod
+// kurzorom, otočenie zápästia (gyro Z) ho plynulo otáča, kývnutie zápästia ho prevráti, uvoľnenie prstov ho prichytí na mriežku.
+// Gestá sú v utils/cursorInput.ts, správanie bloku (ťahanie, otáčanie, prevrat, prichytenie) v utils/pieceManip.ts.
+// Pohyb ruky -> kurzor je rovnaký ako v "Skúške kreslenia" (ShapeTraceModal), kde vpravo/vľavo/hore/dole funguje dobre:
+// lineárne (bez krivky odozvy), bez mŕtvej zóny, zosilnenie 1 v oboch osiach, bez One Euro filtra, vyhladenie kurzora 0,35.
+// Predtým: zosilnenie 1,5 + krivka 0,5 + zvislá os ×1/1,5 + mŕtva zóna 0,05 – smery mali rozdielnu citlivosť a začiatok pohybu "lepil".
+const HAND_POS_GAIN = 1;
+// Vľavo/vpravo silnejšie: plátno kreslenia je široké (vodorovne w/2 px na jednotku, ~1,7× viac ako zvisle), hracie pole
+// Pentomina je štvorcové (20×20), takže pri rovnakom zosilnení bol vodorovný pohyb ~1,7× slabší. Zápästie má navyše
+// vodorovne menší rozsah. Hore/dole ostáva 1 (funguje dobre).
+const HAND_X_GAIN = 1.7;
+const HAND_Y_SCALE = 1;
+const HAND_RESPONSE_CURVE = 0;
+const HAND_TILT_DEADZONE = 0;
+// Menej vyhladenia ako v kreslení (0,35 + posAlpha 0,28 dávalo ~50 ms oneskorenia); bloky idú po bunkách s hysteréziou,
+// takže tremor sa na nich neprejaví.
+const CURSOR_SMOOTH = 0.6;
+const HAND_POS_ALPHA = 0.45;
+const SHOW_GLOVE_CURSOR = true; // kurzor rukavice: stisk všetkých prstov nad blokom ho zachytí (pozri PieceManipulator.begin)
+const GRIP_RECENTER_MS = 180; // po stisku prstov (ruka sa pri stisku hýbe) sa náklon vynuluje v aktuálnej polohe: tak sa rozpozná aj otočená ruka ("kosť") a korekcie osí platia okolo skutočného nuly
+const CALIB_HOLD_MS = 3000;   // všetky prsty stisnuté bez pohybu a bez zachyteného bloku takto dlho = nový nulový bod ruky a kurzor do stredu (3 s, aby sa nezamenilo s bežným stiskom)
+const CALIB_STILL = 0.12;     // 'bez pohybu': kurzor (rozsah -1..1) sa nesmie pohnúť o viac ako toľko, inak odmeriavanie začína odznova
+const CALIB_SHOW_MS = 500;    // priebeh sa ukazuje až po tomto čase (krátky stisk mimo bloku ho neukáže)
+// Stisk aj uvoľnenie prstov samo nakloní rukavicu (na záznamoch 3–7°, t. j. ~1–2 bunky). Pri stisku to pohltí vynulovanie
+// po GRIP_RECENTER_MS; pri uvoľnení nie, preto kurzor po pustení bloku "uletel". Počas oboch prechodov kurzor stojí.
+const GRIP_FREEZE_MS = GRIP_RECENTER_MS + 60; // od začiatku stisku do vynulovania (s rezervou, aby vynulovanie padlo ešte do zmrazenia)
+const RELEASE_FREEZE_MS = 350;   // po uvoľnení: prsty sa otvárajú postupne (stisk končí už prvým uvoľneným prstom)
+const RELEASE_LOOKBACK_MS = 80;  // poloha pred uvoľnením: naklonenie začína ešte pred tým, ako prst klesne pod prah
+// Výpadok JEDNÉHO prsta (4 z 5) počas stisku sa za uvoľnenie považuje až po tomto čase. Pohyb zápästia mení napätie tenzometrov
+// a jeden prst krátko klesne pod prah: blok sa potom pustil, kurzor zamrzol a po 200 ms sa chytil znova – presun išiel "po bunkách".
+// Pustenie viacerých prstov naraz (≤ 3) platí hneď.
+const GRIP_DROPOUT_MS = 250;
+// Zámok osi kurzora (ako zámok osi bloku v pieceManip): pri zjavne vodorovnom/zvislom pohybe sa bočná zložka zahodí.
+// Prečo: náklon ruky má bočnú zložku (natočenie senzora a oblúk zápästia nesedia u každého presne – na záznamoch 10–35 %).
+// Bloky sa hýbu po bunkách, preto tu zámok ostáva (kreslenie ho nemá: kruh a šikmé čiary).
+const AXIS_LOCK_MIN = 0.06;      // posun (rozsah -1..1, ~0,6 bunky) v hlavnej osi, od ktorého sa zámok zvažuje
+const AXIS_LOCK_RATIO = 1.8;     // hlavná os ≥ 1,8× bočná (odklon do ~29°) = pohyb po osi
+const AXIS_UNLOCK_RATIO = 0.8;   // bočná os ≥ 0,8× hlavnej (~39°) = zámerne šikmý pohyb, zámok sa uvoľní
+const STROKE_STILL_SPEED = 0.15; // rýchlosť (rozsah/s), pod ktorou ruka "stojí"
+const STROKE_END_MS = 150;       // po takejto pauze sa pohyb považuje za skončený a ďalší sa vyhodnocuje odznova
+// Farby hracieho poľa
+const BOARD_FRAME = '#e2e8f0';      // okraj okolo mriežky
+const BOARD_CELL = '#f1f5f9';       // bunky mimo cieľa
+const BOARD_LINE = '#b8c4d4';       // čiary buniek
+const BOARD_LINE_MAJOR = '#8a9bb2'; // každá 5. čiara
+const TARGET_FILL = 'rgba(253, 230, 138, 0.55)'; // cieľová plocha (jemná žltá), čierny obrys ostáva
+const SAMPLE_TIMEOUT_MS = 2000;     // (stream sa každých ~40 s na ~1 s preruší, preto nie menej)  bez vzoriek dlhšie ako toto sa gesto preruší a pred ďalším treba uvoľniť prsty
+const EMPTY_SNAPSHOT: ManipSnapshot = { live: null, cursor: null, hoverUid: null };
+// Zmenilo sa niečo, čo kreslí React (všetko okrem kurzora)?
+function sameSnap(a: ManipSnapshot, b: ManipSnapshot): boolean {
+  if (a.hoverUid !== b.hoverUid) return false;
+  const x = a.live, y = b.live;
+  if (!x || !y) return x === y;
+  return x.uid === y.uid && x.grid === y.grid && x.cx === y.cx && x.cy === y.cy && x.angle === y.angle &&
+    x.flipScale === y.flipScale && x.grabbed === y.grabbed && x.ghost === y.ghost;
+}
+const SELECTED_OUTLINE = '#17647d'; // obrys vybraného bloku (rovnaká farba ako v Tangrame)
 
 type Props = {
   dualHands?: boolean; // ovládanie OBOMA rukami naraz (ľavá + pravá), obe robia ten istý pohyb spolu
@@ -123,19 +154,24 @@ export function PentominoGame({
   const [movesCount, setMovesCount] = useState(0); // Počet pohybov (ťahov)
   const [totalPlacedCount, setTotalPlacedCount] = useState(0);
   const [levelPlacedCounts, setLevelPlacedCounts] = useState<number[]>([]);
-  // Animácia prevratu: uid kúska + čítač, ktorý reštartuje CSS animáciu
-  const [flipAnim, setFlipAnim] = useState<{ uid: string; n: number } | null>(null);
-  const triggerFlipAnim = (uid?: string) => {
-    if (!SMOOTH_FLIP_ENABLED || !uid) return;
-    setFlipAnim((prev) => ({ uid, n: (prev?.n ?? 0) + 1 }));
+  // Snímka stavu z PieceManipulator: kurzor, držaný/otáčaný blok, náhľad dosadnutia (prekresľuje sa po snímkach)
+  const [snap, setSnap] = useState<ManipSnapshot>(EMPTY_SNAPSHOT);
+  const snapRef = useRef<ManipSnapshot>(EMPTY_SNAPSHOT);
+  const cursorElRef = useRef<HTMLDivElement | null>(null);
+  const cursorShownRef = useRef({ x: NaN, y: NaN, grip: false, vis: false });
+  const cellSizeRef = useRef(CELL_SIZE);
+  cellSizeRef.current = CELL_SIZE;
+  const drawCursor = (c: ManipSnapshot['cursor']) => {
+    const el = cursorElRef.current;
+    if (!el) return;
+    const st = cursorShownRef.current;
+    const vis = SHOW_GLOVE_CURSOR && !!c;
+    if (vis !== st.vis) { el.style.display = vis ? 'block' : 'none'; st.vis = vis; }
+    if (!c) return;
+    const cs = cellSizeRef.current, x = 12 + c.col * cs, y = 12 + c.row * cs;
+    if (x !== st.x || y !== st.y) { el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%)`; st.x = x; st.y = y; }
+    if (c.grip !== st.grip) { el.dataset.grip = c.grip ? 'true' : 'false'; st.grip = c.grip; }
   };
-  // Vizuálny stav plynulej rotácie (uhol v stupňoch + doladenie posunu v px)
-  const [rotVisual, setRotVisual] = useState<{ uid: string; angle: number; tx: number; ty: number; ease: boolean } | null>(null);
-  useEffect(() => {
-    if (!flipAnim) return;
-    const t = setTimeout(() => setFlipAnim(null), SMOOTH_FLIP_MS);
-    return () => clearTimeout(t);
-  }, [flipAnim]);
   const [activePieceId, setActivePieceId] = useState<string | null>(null); // UID aktívneho kúska, null = žiadny
   const [originalPosition, setOriginalPosition] = useState<{row: number, col: number} | null>(null); // Pôvodná pozícia pri presúvaní
   const [reloadKey, setReloadKey] = useState<number>(0);
@@ -157,47 +193,19 @@ export function PentominoGame({
   const dualRef = useRef<{ left: { sample: any; out: any; ts: number } | null; lastLeftTs: number; rightTs: number }>({ left: null, lastLeftTs: 0, rightTs: 0 });
   const [dualMissing, setDualMissing] = useState<string | null>(null); // ktorá ruka nedodáva dáta
   const lastImuTsRef = useRef<number | null>(null);
-  const lastGestureTimeRef = useRef<number>(0); // Samostatný timestamp pre gestá
-  const lastPieceSwitchTimeRef = useRef<number>(0); // Timestamp pre zmenu blokov
-  // === Relatívny pohyb bloku pri gripe ===
-  const gripStartGridRef = useRef<{ x: number; y: number } | null>(null); // Pozícia ruky na začiatku gripu
-  const gripStartPieceRef = useRef<{ row: number; col: number } | null>(null); // Pozícia bloku na začiatku gripu
-  const wasGrippingRef = useRef<boolean>(false); // Predchádzajúci stav gripu
-  const moveLastStepRef = useRef<number>(0); // čas posledného kroku bloku (ms)
-  const movementStartedRef = useRef<boolean>(false); // Či už začal pohyb (po uplynutí TAP_MAX_DURATION)
-  const isRotatingRef = useRef<boolean>(false); // Či práve prebieha rotácia (blokuje pohyb)
-  const flipDirectionRef = useRef<number>(0); // Smer prvého flipu v rámci gripu (1 alebo -1, 0 = žiadny)
-  const wasThumbPressedRef = useRef<boolean>(false); // Predchádzajúci stav palca (pre rising edge detekciu)
-  const gripStartTimeRef = useRef<number>(0); // Čas začiatku gripu pre rozlíšenie tap vs hold
-  const lastTapTimeRef = useRef<number>(0); // Čas posledného tapnutia
-  const tapCountRef = useRef<number>(0); // Počet tapnutí v sérii
-  const tapTimeoutRef = useRef<number | null>(null); // ID timeoutu pre reset tap okna
-  // Synchronizácia "dýchania" (fill-breathe) medzi všetkými bunkami aktívneho kusa
-  const BREATH_MS = 2000; // zodpovedá `fill-breathe` 2s
-  const breatheSyncOffsetRef = useRef<number>(Date.now() % BREATH_MS);
+  const lastSampleAtRef = useRef<number>(0); // čas poslednej vzorky (strážca straty dát)
   const gridRef = useRef(grid);
   const availableRef = useRef(availablePieces);
-  const twistLastTsRef = useRef<number>(0);
-  const twistQuietUntilRef = useRef<number>(0);
-  const twistActiveTsRef = useRef<number>(0);
-  const flipAccRef = useRef<number>(0);
-  const flipActiveTsRef = useRef<number>(0);
-  const flipLastTsRef = useRef<number>(0);
-  const twistShowingRef = useRef<boolean>(false);
-  const rotSettlingFnRef = useRef<(() => boolean) | null>(null);
-  const twistAccRef = useRef<number>(0); // Akumulované otočenie zápästia (°) počas gripu
   const draggingRef = useRef(draggingPiece);
   const placedPiecesRef = useRef(placedPieces);
   const activePieceIdRef = useRef(activePieceId);
+  const grabbedRef = useRef(false); // blok drží ruka – kontrola výhry počká na uvoľnenie
+  const manipRef = useRef<PieceManipulator | null>(null);
+  const inputRef = useRef<CursorGripInput | null>(null);
+  const commitPieceRef = useRef<(info: CommitInfo) => void>(() => {});
+  const playableRef = useRef(true);
+  const showImuDebugRef = useRef(false);
   useEffect(() => { gridRef.current = grid; }, [grid]);
-  useEffect(() => {
-    return () => {
-      if (tapTimeoutRef.current) {
-        window.clearTimeout(tapTimeoutRef.current);
-        tapTimeoutRef.current = null;
-      }
-    };
-  }, []);
   useEffect(() => { availableRef.current = availablePieces; }, [availablePieces]);
   useEffect(() => { draggingRef.current = draggingPiece; }, [draggingPiece]);
   useEffect(() => { placedPiecesRef.current = placedPieces; }, [placedPieces]);
@@ -205,9 +213,28 @@ export function PentominoGame({
   useEffect(() => { scaleRef.current = scale; }, [scale]); // Synchronizácia scaleRef
   // Stav debug overlay
   const [showImuDebug, setShowImuDebug] = useState<boolean>(false);
+  showImuDebugRef.current = showImuDebug;
   const [imuDebug, setImuDebug] = useState<any>({});
   const { isCalibrated, neutralQuat, neutralQuats, requestCalibration, showCalibrationModal } = useCalibration();
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const [handRolled, setHandRolled] = useState<boolean>(false); // rukavica rozpoznaná ako otočená (vstavané osi pre otočenú polohu)
+  // Kotva kurzora (ako v menu a v "Skúške kreslenia"): poloha = kotva + náklon. Pri okraji sa kotva posúva s kurzorom, aby sa nenahromadil náklon
+  // a kurzor sa dal vždy odtiahnuť od steny; po vynulovaní náklonu v kontroléri (rozpoznaná otočená ruka) ostane kurzor na mieste.
+  const anchorRef = useRef({ x: 0, y: 0 });
+  const gripStartRef = useRef(0);
+  const gripRecenteredRef = useRef(false);
+  const calibStartRef = useRef(0);
+  const calibPosRef = useRef({ x: 0, y: 0 });
+  const calibProgRef = useRef(0);
+  const [calibProg, setCalibProg] = useState(0);
+  const lastPosRef = useRef({ x: 0, y: 0 });
+  const prevGripRef = useRef(false);
+  const gripLostAtRef = useRef(0);
+  const strokeRef = useRef<{ prev: { x: number; y: number } | null; seq: number; sx: number; sy: number; lock: 'x' | 'y' | null; stillMs: number }>(
+    { prev: null, seq: -1, sx: 0, sy: 0, lock: null, stillMs: 0 });
+  const freezeRef = useRef<{ pos: { x: number; y: number } | null; until: number; release: boolean }>({ pos: null, until: 0, release: false });
+  const posHistRef = useRef<{ t: number; x: number; y: number }[]>([]);
+  const handRolledRef = useRef<boolean>(false);
   const [isGripping, setIsGripping] = useState<boolean>(false); // State pre IMU grip - použité v kontrole výhry
   const startTimeRef = useRef<number>(Date.now());
   const levelStartRef = useRef<number>(Date.now());
@@ -299,7 +326,14 @@ export function PentominoGame({
   levelUserPlacedRef.current.clear();
   // Vyčisti históriu pri načítaní nového levelu
   setHistoryStack([]);
-  setActivePieceId(initialPlacedPieces.length > 0 ? initialPlacedPieces[0].uid ?? null : null);
+  // Na začiatku nie je vybraný žiadny blok: hráč si ho vyberie sám kurzorom (stisk nad blokom); šípky na klávesnici vyberú prvý
+  setActivePieceId(null);
+  // Nový level / reštart: zahoď rozpracované gesto a nový stav hneď sprístupni gestám (refy sa inak synchronizujú až po prekreslení)
+  gridRef.current = newGrid;
+  placedPiecesRef.current = initialPlacedPieces;
+  activePieceIdRef.current = null;
+  manipRef.current?.reset();
+  inputRef.current?.reset();
     
     // Dostupné kúsky sú len tie, ktoré ešte nie sú umiestnené
     const unusedPieces = currentLevel.startingPositions && currentLevel.startingPositions.length > 0
@@ -331,6 +365,7 @@ export function PentominoGame({
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent).detail;
       setWsConnected(detail?.connected ?? false);
+      if (!detail?.connected) inputRef.current?.cancel(); // odpojenie preruší rozpracované gesto
     };
     window.addEventListener('ws-connection-change', handler);
     return () => window.removeEventListener('ws-connection-change', handler);
@@ -351,12 +386,26 @@ export function PentominoGame({
       // Rovnaké snímanie polohy ako v "Skúške kreslenia": izotropný lineárny náklon z uhla, bez zosilnenia pri stisku
       imuCtrlRef.current.linearTilt = true;
       imuCtrlRef.current.angleTilt = true;
-      imuCtrlRef.current.precisionScale = 1;
+      imuCtrlRef.current.precisionScale = 1; // stisk prstov nesmie meniť polohu kurzora pri rovnakom náklone
       imuCtrlRef.current.posGain = HAND_POS_GAIN;
-      // Rýchlejšia odozva bez chvenia: menej vyhladzovania polohy, väčšia hysterézia hranice bunky (presnosť)
-      imuCtrlRef.current.posAlpha = 0.4;
-      imuCtrlRef.current.gridSmoothAlpha = 0.25;
+      // ako v kreslení: bez One Euro filtra, lineárna odozva, bez mŕtvej zóny (kurzor ide presne za rukou)
+      imuCtrlRef.current.oneEuro = false;
+      imuCtrlRef.current.posAlpha = HAND_POS_ALPHA;
+      imuCtrlRef.current.responseCurve = HAND_RESPONSE_CURVE;
       imuCtrlRef.current.cellHysteresis = 0.3;
+      imuCtrlRef.current.tiltDeadzone = HAND_TILT_DEADZONE;
+      // Rovnaké spracovanie otočenej polohy ako v "Skúške kreslenia": pevné vstavané osi bez priebežného učenia (cukalo kurzorom)
+      // a pevné zosilnenie bez vyrovnávania dosahu podľa smeru.
+      imuCtrlRef.current.autoReach = false;
+      imuCtrlRef.current.autoReachTarget = 0.6;
+      imuCtrlRef.current.autoAxes = false;
+      imuCtrlRef.current.rolledTune = { up: 1.4, down: 1.7, shear: -0.2, right: 1, left: 1 }; // len otočená poloha; ladenie: localStorage 'rehapiano.drawRolled' (rovnaké ako v kreslení)
+      try {
+        const raw = localStorage.getItem('rehapiano.drawRolled');
+        if (raw) imuCtrlRef.current.rolledTune = { ...imuCtrlRef.current.rolledTune, ...JSON.parse(raw) };
+      } catch { /* ignore */ }
+      imuCtrlRef.current.tiltMax = 4; // bez saturácie nakláňania a polohy: kurzor ide plynule až na okraj a nezasekne sa
+      imuCtrlRef.current.posLimit = 4;
     }
     if (dualHands && !imuCtrlLRef.current) {
       imuCtrlLRef.current = new SingleIMUController();
@@ -364,16 +413,48 @@ export function PentominoGame({
     }
   };
 
-  // Globálna IMU kalibrácia
+  // Manipulátor bloku + gestá kurzora. Vytvoria sa raz; stav hry čítajú cez refy, zmeny hlásia cez commit/select/render.
+  const ensureManip = () => {
+    if (manipRef.current) return;
+    const manip = new PieceManipulator({
+      rows: () => GRID_HEIGHT,
+      cols: () => GRID_WIDTH,
+      pieces: () => placedPiecesRef.current,
+      selected: () => activePieceIdRef.current,
+      select: (uid) => { activePieceIdRef.current = uid; setActivePieceId(uid); },
+      commit: (info) => commitPieceRef.current(info),
+      render: (s) => {
+        // Kurzor sa kreslí priamo do DOM (bez Reactu): predtým každý pohyb kurzora (60×/s) prekreslil celú hru = lag.
+        // React sa prekreslí len keď sa zmení blok (poloha, uhol, náhľad dosadnutia) alebo zvýraznenie.
+        drawCursor(s.cursor);
+        if (!sameSnap(snapRef.current, s)) { snapRef.current = s; setSnap(s); }
+        const grabbed = !!s.live?.grabbed;
+        if (grabbed !== grabbedRef.current) { grabbedRef.current = grabbed; setIsGripping(grabbed); }
+      },
+      playing: () => playableRef.current,
+      stepMove: true, // pôvodné ťahanie po bunkách (nie plynulé); otáčanie, prevrat a prichytenie ostávajú nové
+    });
+    manipRef.current = manip;
+    inputRef.current = new CursorGripInput(manip, cfg as any);
+  };
+
+  // Globálna IMU kalibrácia (po novej kalibrácii treba pred ďalším stiskom uvoľniť prsty)
   useEffect(() => {
     ensureCtrls();
+    ensureManip();
     if (dualHands) {
       if (neutralQuats.right) imuCtrlRef.current?.calibrateNeutral(neutralQuats.right);
       if (neutralQuats.left) imuCtrlLRef.current?.calibrateNeutral(neutralQuats.left);
     } else if (imuCtrlRef.current && neutralQuat) {
       imuCtrlRef.current.calibrateNeutral(neutralQuat);
     }
-  }, [neutralQuat, neutralQuats, dualHands]);
+    anchorRef.current = { x: 0, y: 0 };
+    lastPosRef.current = { x: 0, y: 0 };
+    manipRef.current?.reset();
+    inputRef.current?.reset();
+  }, [neutralQuat, neutralQuats, dualHands, useLeftHand]);
+
+  useEffect(() => () => manipRef.current?.dispose(), []);
 
   // Režim dvoch rúk: upozorni, ak jedno zariadenie nedodáva dáta
   useEffect(() => {
@@ -387,18 +468,36 @@ export function PentominoGame({
     return () => window.clearInterval(id);
   }, [dualHands]);
 
+  // Strata dát: po sekunde bez vzorky sa gesto preruší (blok sa pustí na mriežku), kurzor zmizne a treba uvoľniť prsty
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const last = lastSampleAtRef.current;
+      if (last && performance.now() - last > SAMPLE_TIMEOUT_MS) {
+        lastSampleAtRef.current = 0;
+        inputRef.current?.cancel();
+      }
+    }, 250);
+    return () => window.clearInterval(id);
+  }, []);
+
   // Spracovanie IMU: počúvaj 'imu-sample' udalosti odoslané z WebSocketStatus
   useEffect(() => {
     ensureCtrls();
+    ensureManip();
+
+    // === DETEKCIA STISKU (z GameBoard.tsx) ===
+    // Prsty jednej ruky (adc[1..5] = malíček->palec): kalibrované prahy z detail.fingers (WebSocketStatus), inak pôvodný pevný prah
+    const countPressed = (s: { adc?: number[]; fingers?: unknown }) => pressedCountOf(s, cfg);
 
     function onSample(ev: Event) {
-      // Freeze game processing ak nie sme pripojení, nie sme kalibrovaní alebo je otvorený kalibračný modal
-      if (wsConnected && !isCalibrated && showCalibrationModal) return;
+      // Počas kalibrácie sa hra nehýbe a rozpracované gesto sa ruší
+      if (wsConnected && !isCalibrated && showCalibrationModal) { inputRef.current?.cancel(); return; }
+      const input = inputRef.current, manip = manipRef.current;
+      if (!input || !manip) return;
       try {
         const detail = (ev as CustomEvent).detail;
         if (!detail) return;
-        const sample = { imu: detail.imu || {}, adc: detail.adc || [], ts: Date.now() } as any;
-        const adc: number[] = Array.isArray(detail.adc) ? detail.adc : [];
+        const sample = { imu: detail.imu || {}, adc: detail.adc || [], fingers: detail.fingers, ts: Date.now() } as any;
 
         // === REŽIM DVOCH RÚK ===
         // Ľavá ruka len aktualizuje svoj kontrolér; celá logika hry beží na vzorkách pravej ruky
@@ -425,528 +524,223 @@ export function PentominoGame({
         const last = lastImuTsRef.current ?? now;
         const dt = Math.max(1, now - last) / 1000;
         lastImuTsRef.current = now;
+        lastSampleAtRef.current = performance.now();
 
-        // === DETEKCIA STISKU (z GameBoard.tsx) ===
-        const defaultRawThr = (cfg as any)?.TENSOMETER_RAW_THRESHOLD ?? 2000;
-        const defaultNormThr = (cfg as any)?.TENSOMETER_NORM_THRESHOLD ?? 12;
-        // Prsty jednej ruky (adc[1..5] = malíček->palec; pri pravej po reverze)
-        const analyzeHand = (adcArr: number[], leftHand: boolean) => {
-          const raw5 = Array.isArray(adcArr) ? adcArr.slice(1, 6).map((v: any) => Number(v || 0)) : [];
-          const f = leftHand ? raw5 : raw5.slice().reverse();
-          const pressed = f.map((v) => {
-            const raw = Math.abs(v ?? 0);
-            return raw > defaultRawThr || normalizeAdc(raw) > defaultNormThr; // surový alebo normalizovaný prah
-          });
-          return {
-            count: pressed.filter(Boolean).length,
-            // Ukazovák: pri ľavej ruke index 3, pri pravej po reverze index 1; palec vždy index 4
-            index: leftHand ? pressed[3] : pressed[1],
-            thumb: pressed[4],
-          };
-        };
-        const anaMain = analyzeHand(adc, dualHands ? false : useLeftHand);
-        const anaLeft = dualHands && dualL ? analyzeHand(dualL.sample.adc, true) : null;
-        // Dve ruky: grip a prsty platia len keď ich stláčajú OBE ruky (min / AND)
-        const pressedCount = anaLeft ? Math.min(anaMain.count, anaLeft.count) : anaMain.count;
-        const manualGrip = pressedCount === 5;
-        setIsGripping(pressedCount > 0);
+        // Dve ruky: grip platí len keď stláčajú všetkých 5 prstov OBE ruky
+        const pressedMain = countPressed(sample);
+        const pressedCount = dualL ? Math.min(pressedMain, countPressed(dualL.sample)) : pressedMain;
+        let grip = pressedCount === 5;
+        {
+          const tG = performance.now();
+          if (grip) gripLostAtRef.current = 0;
+          else if (prevGripRef.current && pressedCount === 4) {
+            if (!gripLostAtRef.current) gripLostAtRef.current = tG;
+            if (tG - gripLostAtRef.current < GRIP_DROPOUT_MS) grip = true; // krátky výpadok jedného prsta: stisk trvá
+          } else gripLostAtRef.current = 0;
+        }
 
-        const indexFingerPressed = anaLeft ? anaMain.index && anaLeft.index : anaMain.index;
-        const thumbPressed = anaLeft ? anaMain.thumb && anaLeft.thumb : anaMain.thumb;
-        const singlePressed = !manualGrip && indexFingerPressed && pressedCount === 1;
-        const noPress = pressedCount === 0;
-
-        const rightCorr = dualHands || !useLeftHand;
-        imuCtrlRef.current!.tiltRotationDeg = rightCorr ? TILT_ROTATION_RIGHT_DEG : 0;
-        imuCtrlRef.current!.shearUp = rightCorr ? SHEAR_UP_RIGHT_HAND : 0;
-        imuCtrlRef.current!.shearRight = rightCorr ? SHEAR_RIGHT_RIGHT_HAND : 0;
+        // Ruka podľa zariadenia (stream posiela 'hand'), ako v menu a v kreslení; výber v menu len ako záloha
+        const leftMain = !dualHands && (detail.hand === 'left' ? true : detail.hand === 'right' ? false : useLeftHand);
+        applyAxisCorr(imuCtrlRef.current!, leftMain ? 'left' : 'right');
+        // ako v kreslení: počas stisku sa nulový bod (a rozpoznanie otočenej ruky) nesmie meniť, inak vznikne neviditeľná stena
+        imuCtrlRef.current!.freezePose = grip;
+        const seqBefore = imuCtrlRef.current!.recenterSeq;
         const outMain = imuCtrlRef.current!.update(sample, dt);
-        // Dve ruky: sensitívny grip len keď oba, flick z ktorejkoľvek ruky
-        const out = dualL
-          ? { ...outMain, grip: outMain.grip && dualL.out.grip, gesture: outMain.gesture ?? dualL.out.gesture ?? null }
-          : outMain;
+        if (imuCtrlRef.current!.recenterSeq !== seqBefore) anchorRef.current = { ...lastPosRef.current };
+        if (outMain.rolled !== handRolledRef.current) { handRolledRef.current = outMain.rolled; setHandRolled(outMain.rolled); }
 
-        // Normalizácia gyroskopu (streamer posiela °/s)
+        // Normalizácia gyroskopu (streamer posiela °/s). Dve ruky: gyro sa započíta len keď sa obe hýbu rovnakým smerom.
         const nMain = normalizeImuSample(sample.imu, 1);
         const nLeft = dualL ? normalizeImuSample(dualL.sample.imu, 1) : null;
-        const imuN = nMain;
-        // Dve ruky: gyro sa započíta len keď sa obe ruky hýbu rovnakým smerom (menšia z rýchlostí)
-        const gx = nLeft ? fuseSigned(nMain.gyroX_dps, nLeft.gyroX_dps, 1, DUAL_LEFT_GYRO_SIGN.x) : nMain.gyroX_dps;
-        const gy = nLeft ? fuseSigned(nMain.gyroY_dps, nLeft.gyroY_dps, 1, DUAL_LEFT_GYRO_SIGN.y) : nMain.gyroY_dps;
-        const gz = nLeft ? fuseSigned(nMain.gyroZ_dps, nLeft.gyroZ_dps, 1, DUAL_LEFT_GYRO_SIGN.z) : nMain.gyroZ_dps;
-
-        // Otočenie zápästia = gyro Z dominantné nad X,Y a nad mŕtvou zónou; posun ruky sa tak nezamení s otočením.
-        // Znamienko: otočenie kisti doprava (v smere hodinových ručičiek) = kladné gyro Z = kúsok doprava.
-        const gzTwist = Math.abs(gz) > TWIST_DEADZONE_DPS && Math.abs(gz) > TWIST_DOMINANCE * Math.max(Math.abs(gx), Math.abs(gy)) ? gz : 0;
-
-        // Pozícia na gride z IMU
-        // Unified mapping copied from majo: X direct, Y inverted for left hand
-        // Pravá ruka: os X je zrkadlovo obrátená (ťah doprava = blok doprava), ľavá ostáva priama
-        const gridSz = imuCtrlRef.current!.gridSize;
-        let gridX: number;
-        let gridY: number;
-        if (dualL) {
-          // Dve ruky: priemer polôh oboch rúk (každá s mapovaním svojej strany) -> blok ide tam, kam idú obe
-          gridX = Math.round(((gridSz - 1 - outMain.grid.x) + dualL.out.grid.x) / 2);
-          gridY = Math.round((outMain.grid.y + (gridSz - 1 - dualL.out.grid.y)) / 2);
-        } else {
-          gridX = useLeftHand ? out.grid.x : (gridSz - 1 - out.grid.x);
-          gridY = useLeftHand ? (gridSz - 1 - out.grid.y) : out.grid.y;
-        }
-
-        // === ROTÁCIA A FLIP PRI STLAČENOM UKAZOVÁKU ===
-        const GYRO_ROTATION_THRESHOLD = 20; // °/s - zvýšené z 15 na 20
-        const GYRO_FLIP_THRESHOLD = 22; // °/s - zvýšené z 18 na 22
-        const GYRO_ROTATION_COOLDOWN_MS = 800; // ms - zvýšené z 650 na 800
-        const MAX_SHIFT = 5; // Maximálny posun pre auto-shift
-
-        // Helper: nájdi najbližšiu validnú pozíciu pre transformovaný blok
-        const findValidPosition = (
-          tempGrid: boolean[][],
-          transformedPiece: boolean[][],
-          startRow: number,
-          startCol: number
-        ) => findNearestValidPosition(tempGrid, transformedPiece, startRow, startCol, MAX_SHIFT);
-
-        const currentActivePieceId = activePieceIdRef.current;
-        
-        // === ZDIEĽANÁ ZMENA AKTÍVNEHO BLOKU (double-tap aj flick) ===
-        // direction: 1 = ďalší, -1 = predchádzajúci; zdieľaný cooldown zabráni dvojitému prepnutiu
-        const PIECE_SWITCH_COOLDOWN_MS = 500;
-        const switchActivePiece = (direction: 1 | -1): boolean => {
-          if (now - lastPieceSwitchTimeRef.current < PIECE_SWITCH_COOLDOWN_MS) return false;
-          const pieces = placedPiecesRef.current;
-          const idx = pieces.findIndex(p => p.uid === currentActivePieceId);
-          if (idx === -1 || pieces.length <= 1) return false;
-          const next = pieces[(idx + direction + pieces.length) % pieces.length];
-          if (!next || !next.uid) return false;
-          setActivePieceId(next.uid);
-          lastPieceSwitchTimeRef.current = now;
-          return true;
+        const gyro = {
+          x: nLeft ? fuseSigned(nMain.gyroX_dps, nLeft.gyroX_dps, 1, DUAL_LEFT_GYRO_SIGN.x) : nMain.gyroX_dps,
+          y: nLeft ? fuseSigned(nMain.gyroY_dps, nLeft.gyroY_dps, 1, DUAL_LEFT_GYRO_SIGN.y) : nMain.gyroY_dps,
+          z: nLeft ? fuseSigned(nMain.gyroZ_dps, nLeft.gyroZ_dps, 1, DUAL_LEFT_GYRO_SIGN.z) : nMain.gyroZ_dps,
         };
-        
-        // === EXKLUZIVITA AKCIÍ ===
-        // Ak je stlačený palec (zmena blokov), NEVYKonávaj rotáciu ani flip
-        const isThumbAction = thumbPressed && !manualGrip && !indexFingerPressed;
-        
-        // PLYNULÁ ROTÁCIA ZÁPÄSTÍM (rovnaká logika ako klávesy R/E): pri stisnutom gripe sa nakumulovaný
-        // uhol zápästia (gyro Z) priebežne zobrazuje na kúsku; po pustení gripu alebo po pauze sa
-        // kúsok prichytí na najbližší násobok 90° (pod 45° späť, nad 45° na 90°).
-        // Kým sa blok presúva (movementStartedRef), sa neotáča – akumulátor sa vtedy ukončí.
-        const sendTwist = (detail: { uid?: string; angle?: number; release?: boolean }) =>
-          window.dispatchEvent(new CustomEvent('piece-twist', { detail }));
-        const rotSettling = !!rotSettlingFnRef.current?.();
-        if (manualGrip && currentActivePieceId && !draggingRef.current && !isThumbAction) {
-          if (rotSettling) {
-            twistAccRef.current = 0; // počas dorovnávania (prichytenia) nič nenaberaj
-            twistLastTsRef.current = 0;
-          } else if (now - twistLastTsRef.current >= TWIST_SAMPLE_MS) {
-            const twistDt = Math.min(0.25, (now - twistLastTsRef.current) / 1000);
-            if (twistLastTsRef.current > 0 && gzTwist !== 0) {
-              twistAccRef.current = Math.max(-270, Math.min(270, twistAccRef.current + (gzTwist * twistDt) / TWIST_DIFFICULTY));
-              twistActiveTsRef.current = now;
+
+        // Poloha kurzora -1..1 v súradniciach obrazovky. Zrkadlenie osí ako v menu a v "Skúške kreslenia":
+        // ľavá ruka (x, -y), pravá (-x, y). Dve ruky: priemer polôh oboch rúk.
+        const mainPos = !leftMain
+          ? { x: -outMain.posNorm.x, y: outMain.posNorm.y }
+          : { x: outMain.posNorm.x, y: -outMain.posNorm.y };
+        const rawBoth = dualL
+          ? { x: (mainPos.x + dualL.out.posNorm.x) / 2, y: (mainPos.y - dualL.out.posNorm.y) / 2 }
+          : mainPos;
+        const rawPos = { x: rawBoth.x * HAND_X_GAIN, y: rawBoth.y * HAND_Y_SCALE };
+        const anchor = anchorRef.current;
+        // Zámok osi kurzora (pozri AXIS_LOCK_*): bočná zložka pohybu sa pri pohybe po osi odpočíta cez kotvu.
+        {
+          const st = strokeRef.current;
+          const seq = imuCtrlRef.current!.recenterSeq;
+          const frozenNow = !!freezeRef.current.pos || grip !== prevGripRef.current;
+          if (!st.prev || st.seq !== seq || frozenNow) {
+            // po vynulovaní náklonu (skok surovej polohy) a počas zmrazenia sa nemeria; nový pohyb od nuly
+            st.sx = 0; st.sy = 0; st.lock = null; st.stillMs = 0;
+          } else {
+            const dx = rawPos.x - st.prev.x, dy = rawPos.y - st.prev.y;
+            if (Math.hypot(dx, dy) / dt < STROKE_STILL_SPEED) {
+              st.stillMs += dt * 1000;
+              if (st.stillMs > STROKE_END_MS) { st.sx = 0; st.sy = 0; st.lock = null; }
+            } else st.stillMs = 0;
+            st.sx += dx; st.sy += dy;
+            const ax = Math.abs(st.sx), ay = Math.abs(st.sy);
+            if (st.lock === 'x' && ay > AXIS_UNLOCK_RATIO * ax) st.lock = null;
+            else if (st.lock === 'y' && ax > AXIS_UNLOCK_RATIO * ay) st.lock = null;
+            if (!st.lock) {
+              if (ax >= AXIS_LOCK_MIN && ax > AXIS_LOCK_RATIO * ay) st.lock = 'x';
+              else if (ay >= AXIS_LOCK_MIN && ay > AXIS_LOCK_RATIO * ax) st.lock = 'y';
             }
-            twistLastTsRef.current = now;
-            if (twistAccRef.current !== 0) {
-              twistShowingRef.current = true;
-              sendTwist({ uid: currentActivePieceId, angle: twistAccRef.current });
-              // Pauza v otáčaní -> prichyť na najbližších 90° a pokračuj odznova
-              if (now - twistActiveTsRef.current > TWIST_COMMIT_IDLE_MS) {
-                sendTwist({ release: true });
-                twistShowingRef.current = false;
-                twistAccRef.current = 0;
-              }
+            if (st.lock === 'x') anchor.y -= dy;
+            else if (st.lock === 'y') anchor.x -= dx;
+          }
+          st.prev = { ...rawPos }; st.seq = seq;
+        }
+        // Zmrazenie kurzora pri prechode stisk <-> uvoľnenie (pozri GRIP_FREEZE_MS / RELEASE_FREEZE_MS): kotva sa dorovná tak,
+        // aby poloha ostala stáť; po skončení kurzor pokračuje plynulo od tohto miesta.
+        const tPos = performance.now();
+        const fr = freezeRef.current;
+        if (grip !== prevGripRef.current) {
+          if (grip) {
+            fr.pos = { ...lastPosRef.current };
+            fr.until = tPos + GRIP_FREEZE_MS;
+            fr.release = false;
+          } else {
+            // Počas držania je kurzor prilepený k bloku (blok ide po bunkách, so zámkom osi a zastaví sa o stenu/blok), takže
+            // jeho poloha sa líši od polohy ruky. Po pustení ostane tam, kde ho hráč videl, nie na polohe ruky.
+            // Posun z otáčania (input.offset) sa tu zapracuje do kotvy a v inpute zahodí: inak ostal natrvalo, kurzor sa pri
+            // ďalšom pohybe zasekol o okraj skôr (alebo neskôr) a po pustení na okamih odletel k polohe ruky.
+            const held = manip.heldCursor();
+            let back: { x: number; y: number };
+            if (held) {
+              back = { x: held.x, y: held.y };
+              input.clearOffset();
+            } else {
+              const hist = posHistRef.current;
+              back = hist[hist.length - 1] ?? { ...lastPosRef.current };
+              for (let i = hist.length - 1; i >= 0 && hist[i].t >= tPos - RELEASE_LOOKBACK_MS; i--) back = hist[i];
             }
+            fr.pos = { x: back.x, y: back.y };
+            fr.until = tPos + RELEASE_FREEZE_MS;
+            fr.release = true;
+            lastPosRef.current = { ...fr.pos }; // bez dobehu vyhladenia: kurzor ostane presne tam, kde bol pri bloku
           }
-        } else {
-          if (twistShowingRef.current) {
-            sendTwist({ release: true }); // grip pustený / začal presun -> prichyť
-            twistShowingRef.current = false;
-          }
-          twistAccRef.current = 0;
-          twistLastTsRef.current = 0;
+          prevGripRef.current = grip;
         }
-
-        // FLIP AKUMULÁCIOU: kumulujeme otočenie okolo osi X len keď je X jasne dominantná os,
-        // je nad mŕtvou zónou, grip je plný a blok sa nepresúva ani sa práve neotáča zápästím.
-        // Jednorazová špička (šum, mávnutie, náklon pri ťahu) sa tak nikdy nepremení na flip.
-        const flipGateOpen = manualGrip && !!currentActivePieceId && !draggingRef.current && !isThumbAction &&
-          !movementStartedRef.current && Math.abs(twistAccRef.current) < 20;
-        if (flipGateOpen) {
-          const fdt = flipLastTsRef.current > 0 ? Math.min(0.1, (now - flipLastTsRef.current) / 1000) : 0;
-          flipLastTsRef.current = now;
-          const gf = (gy - gx) / Math.SQRT2;                 // flipová os (diagonála X/Y)
-          const gPerp = (gy + gx) / Math.SQRT2;              // kolmá zložka v rovine X/Y (pri kyvnutí ~0)
-          const dominant = Math.abs(gf) > FLIP_DOMINANCE * Math.abs(gPerp) && Math.abs(gf) > FLIP_DOMINANCE * Math.abs(gz);
-          if (dominant && Math.abs(gf) > FLIP_DEADZONE_DPS) {
-            // opačný smer (návrat ruky) akumulátor skôr zruší, než by sa nabil
-            if (flipAccRef.current !== 0 && Math.sign(gf) !== Math.sign(flipAccRef.current)) flipAccRef.current = 0;
-            flipAccRef.current += gf * fdt;
-            flipActiveTsRef.current = now;
-          } else if (now - flipActiveTsRef.current > FLIP_IDLE_RESET_MS) {
-            flipAccRef.current = 0;
-          }
-        } else {
-          flipAccRef.current = 0;
-          flipLastTsRef.current = 0;
-        }
-
-        // ROTÁCIA: keď je stlačený GRIP (všetky prsty) -> otáčaj podľa osi Z gyra
-        // Použitie hysterézie: gyroskop musel byť pred tým uvoľnený
-        if (manualGrip && currentActivePieceId && !draggingRef.current && !isThumbAction && !movementStartedRef.current) {
-          const currentPlacedPieces = placedPiecesRef.current;
-          const activePiece = currentPlacedPieces.find((p) => p.uid === currentActivePieceId);
-          
-          if (activePiece && now - lastGestureTimeRef.current >= GYRO_ROTATION_COOLDOWN_MS) {
-            const gyro = out.gyro || { x: 0, y: 0, z: 0 };
-            
-            // FLIP: nakumulovaný uhol okolo X dosiahol FLIP_STEP_DEG (viď akumulácia vyššie)
-            if (Math.abs(flipAccRef.current) >= FLIP_STEP_DEG) {
-              const sign = Math.sign(flipAccRef.current);
-              flipAccRef.current = 0;
-              // Povoliť flip len ak sme ešte neflipovali (0) alebo ak ideme rovnakým smerom
-              // Tým sa zabráni nechcenému flipu pri návrate ruky (opačný smer)
-              if (flipDirectionRef.current === 0 || flipDirectionRef.current === sign) {
-                const flipped = flipPentomino(activePiece.grid);
-                const tempGrid = removePiece(gridRef.current, activePiece);
-                
-                const validPos = findValidPosition(tempGrid, flipped, activePiece.row, activePiece.col);
-                
-                if (validPos) {
-                  // Save prior state for undo when flipping an existing piece via IMU
-                  saveToHistory();
-                  const newGridState = placePiece(tempGrid, flipped, validPos.row, validPos.col, activePiece.color);
-                  setGrid(newGridState);
-                  setPlacedPieces((prev) => prev.map((p) => (p.uid === currentActivePieceId ? { ...p, grid: flipped, row: validPos.row, col: validPos.col } : p)));
-                  triggerFlipAnim(currentActivePieceId);
-                  lastGestureTimeRef.current = now;
-                  // Označíme že gesto bolo vykonané - vyžaduje sa uvoľnenie pred ďalším
-                  imuCtrlRef.current?.consumeGyroX();
-                  // Synchronizuj fázu dýchania aby všetky bunky zostali v rovnakom okamihu
-                  breatheSyncOffsetRef.current = Date.now() % BREATH_MS;
-                  // Nastav flag že prebieha rotácia (blokuje pohyb)
-                  isRotatingRef.current = true;
-                  flipDirectionRef.current = sign;
-                }
-              }
-            }
-          }
-        }
-
-        // === DETEKCIA TAP vs HOLD (Double Tap pre zmenu bloku) ===
-        const TAP_MAX_DURATION = 200; // ms - maximálne trvanie pre tap
-        const DOUBLE_TAP_WINDOW = 1000; // ms - okno pre double tap (informational)
-
-        // Detekcia hrany gripu
-        if (manualGrip && !wasGrippingRef.current) {
-          // Začiatok gripu
-          gripStartTimeRef.current = now;
-          wasGrippingRef.current = true;
-          movementStartedRef.current = false;
-          isRotatingRef.current = false; // Reset flagu rotácie
-          flipDirectionRef.current = 0; // Reset smeru flipu
-          // Pri stlačení všetkých prstov nastav aktuálnu polohu ruky ako novú kalibrovanú nulu
-          // a vynuluj akumulovaný uhol, aby sa náklon/otočenie nenabaľovalo medzi gripmi.
+        let recenterAfterRelease = false;
+        if (fr.pos && (tPos < fr.until || fr.release)) {
+          anchor.x = fr.pos.x - rawPos.x; anchor.y = fr.pos.y - rawPos.y;
+          // Koniec zmrazenia po uvoľnení: nulový bod sa vynuluje aj v polohe OTVORENEJ ruky (pri stisku sa vynuluje v polohe stisku).
+          // Inak by mŕtva zóna a jemná krivka odozvy ostali okolo polohy stisku a otvorená ruka by bola mimo stredu,
+          // takže jeden smer by začínal prechodom cez mŕtvu zónu.
+          if (tPos >= fr.until) { recenterAfterRelease = true; fr.pos = null; fr.release = false; }
+        } else fr.pos = null;
+        const tgtX = anchor.x + rawPos.x, tgtY = anchor.y + rawPos.y;
+        const clamped = { x: Math.max(-1, Math.min(1, tgtX)), y: Math.max(-1, Math.min(1, tgtY)) };
+        anchor.x += clamped.x - tgtX; anchor.y += clamped.y - tgtY;
+        // vyhladenie kurzora ako v kreslení (CURSOR_SMOOTH)
+        const prevPos = lastPosRef.current;
+        const position = {
+          x: prevPos.x + CURSOR_SMOOTH * (clamped.x - prevPos.x),
+          y: prevPos.y + CURSOR_SMOOTH * (clamped.y - prevPos.y),
+        };
+        lastPosRef.current = position;
+        const hist = posHistRef.current;
+        hist.push({ t: tPos, x: position.x, y: position.y });
+        while (hist.length && hist[0].t < tPos - 300) hist.shift();
+        // Otočená ruka ("kosť"): ako v kreslení sa nula nevynuluje ani pri stisku, ani po uvoľnení. Korekcie osí (zosilnenia
+        // hore/dole, skos, oblúk vpravo) sú navrhnuté okolo neutrálnej polohy zápästia; po vynulovaní inde by sa smery správali inak.
+        // Kurzor ostáva spojitý cez kotvu.
+        const rolledNow = !!outMain.rolled;
+        if (recenterAfterRelease && !rolledNow) {
           imuCtrlRef.current?.recenter(sample.imu);
           if (dualL) imuCtrlLRef.current?.recenter(dualL.sample.imu);
-          gripStartGridRef.current = null;
-          gripStartPieceRef.current = null;
-          twistQuietUntilRef.current = 0;
-          twistActiveTsRef.current = 0;
-          twistAccRef.current = 0;
-          twistLastTsRef.current = 0;
-          // Ešte nenastavujeme isGripping ani gripStartGridRef, čakáme či to bude tap alebo hold
-        } else if (!manualGrip && wasGrippingRef.current) {
-          // Koniec gripu
-          wasGrippingRef.current = false;
-          isRotatingRef.current = false; // Reset flagu rotácie
-          
-          if (movementStartedRef.current) {
-            // Bol to pohyb (HOLD)
-            setIsGripping(false); // Ukonči vizuálny grip
-            movementStartedRef.current = false;
-            gripStartGridRef.current = null;
-            gripStartPieceRef.current = null;
-          } else {
-            // Bol to TAP (krátky stisk bez pohybu)
-            const duration = now - gripStartTimeRef.current;
-            if (duration < TAP_MAX_DURATION) {
-              // Use a counter + timeout to implement a 1s double-tap window for piece switch
-              if (tapCountRef.current === 0) {
-                tapCountRef.current = 1;
-                if (tapTimeoutRef.current) window.clearTimeout(tapTimeoutRef.current);
-                tapTimeoutRef.current = window.setTimeout(() => {
-                  tapCountRef.current = 0;
-                  tapTimeoutRef.current = null;
-                }, 1000);
-              } else if (tapCountRef.current === 1) {
-                // SECOND TAP within window -> perform double-tap only if hand was stable
-                const currentPlacedPieces = placedPiecesRef.current;
-                const activePieceIndex = currentPlacedPieces.findIndex(p => p.uid === currentActivePieceId);
+          anchorRef.current = { ...position };
+        }
 
-                // Stabilization logic: allow a small cell movement OR a quick second tap
-                const STABLE_CELL_THRESHOLD = 1; // allow up to 1 cell movement
-                const STABILIZE_MS = 300; // allow quick double-tap within 300 ms regardless of tiny movement
-                const startGrid = gripStartGridRef.current;
-                const movedCells = startGrid ? Math.abs(gridX - startGrid.x) + Math.abs(gridY - startGrid.y) : 0;
-                const timeSinceFirst = now - gripStartTimeRef.current;
-
-                const allowDoubleTap = (movedCells <= STABLE_CELL_THRESHOLD) || (timeSinceFirst <= STABILIZE_MS);
-
-                if (allowDoubleTap) {
-                  switchActivePiece(1);
-                }
-
-                // reset tap counter & timeout in any case
-                tapCountRef.current = 0;
-                if (tapTimeoutRef.current) {
-                  window.clearTimeout(tapTimeoutRef.current);
-                  tapTimeoutRef.current = null;
-                }
-              }
+        // Vynulovanie náklonu pri každom stisku (ako v menu a v kreslení): nula sa berie v pozícii ruky pri zachytení, nie v kalibračnej.
+        // Poloha kurzora ostáva spojitá (kotva = posledná poloha), blok sa preto neskočí.
+        if (grip) {
+          const tNow = performance.now();
+          if (!gripStartRef.current) gripStartRef.current = tNow;
+          if (!gripRecenteredRef.current && tNow - gripStartRef.current >= GRIP_RECENTER_MS && !manip.hasMoved() && !input.transformed) {
+            gripRecenteredRef.current = true;
+            if (!rolledNow) {
+              imuCtrlRef.current?.recenter(sample.imu);
+              if (dualL) imuCtrlLRef.current?.recenter(dualL.sample.imu);
+              anchorRef.current = { ...lastPosRef.current };
             }
           }
-        }
-        
-        // === FLICK GESTO: zmena aktívneho bloku (alternatíva k double-tap) ===
-        // flick-up = ďalší blok, flick-down = predchádzajúci; left/right sa ignorujú.
-        // Prijaté len v pokojnom stave (bez gripu, bez prstov, bez presúvania), aby sa
-        // nezamenilo s pohybom ruky pri nesení bloku.
-        if (
-          FLICK_SWITCH_ENABLED &&
-          out.gesture &&
-          pressedCount === 0 &&
-          !wasGrippingRef.current &&
-          !movementStartedRef.current &&
-          !draggingRef.current
-        ) {
-          if (out.gesture === 'flick-up') switchActivePiece(1);
-          else if (out.gesture === 'flick-down') switchActivePiece(-1);
+        } else {
+          gripStartRef.current = 0;
+          gripRecenteredRef.current = false;
         }
 
-        // Aktualizuj predchádzajúci stav palca (ponechané pre prípadné iné použitie)
-        const thumbOnlyPressed = thumbPressed && pressedCount === 1;
-        wasThumbPressedRef.current = thumbOnlyPressed;
+        // Kalibrácia polohy: všetky prsty stisnuté ~1 s bez pohybu, keď NIE JE zachytený žiadny blok (stisk mimo blokov).
+        // Držanie bloku sa nikdy nepovažuje za kalibráciu (ani keď sa blok ešte nepohol). Kurzor ostane na mieste, mení sa len nulový bod ruky.
+        if (grip && !input.moving && !manip.hasMoved() && !input.transformed && !draggingRef.current && playableRef.current) {
+          const cp = calibPosRef.current;
+          if (!calibStartRef.current || Math.hypot(position.x - cp.x, position.y - cp.y) > CALIB_STILL) {
+            calibStartRef.current = performance.now();
+            calibPosRef.current = { ...position };
+          }
+          const held = performance.now() - calibStartRef.current;
+          const prog = held > CALIB_SHOW_MS ? Math.min(1, held / CALIB_HOLD_MS) : 0;
+          if (Math.abs(prog - calibProgRef.current) > 0.04 || (prog === 0) !== (calibProgRef.current === 0)) {
+            calibProgRef.current = prog; setCalibProg(prog);
+          }
+          if (held >= CALIB_HOLD_MS) {
+            imuCtrlRef.current?.recenter(sample.imu);
+            if (dualL) imuCtrlLRef.current?.recenter(dualL.sample.imu);
+            // nový nulový bod v tejto polohe ruky a kurzor do stredu; zmrazenie pri uvoľnení ho tam udrží
+            anchorRef.current = { x: 0, y: 0 };
+            lastPosRef.current = { x: 0, y: 0 };
+            posHistRef.current = [];
+            calibStartRef.current = 0; calibProgRef.current = 0; setCalibProg(0);
+            input.reset(); // ďalší stisk až po uvoľnení prstov
+            return;
+          }
+        } else if (calibStartRef.current || calibProgRef.current) {
+          calibStartRef.current = 0; calibProgRef.current = 0; setCalibProg(0);
+        }
 
-        // === POHYB AKTÍVNEHO BLOKU (RELATÍVNY) ===
-        // Pohyb sa aktivuje len ak grip trvá dlhšie ako TAP_MAX_DURATION (HOLD)
-        // A ZÁROVEŇ neprebieha rotácia (isRotatingRef)
-        const isHold = manualGrip && (now - gripStartTimeRef.current > TAP_MAX_DURATION) && !isRotatingRef.current;
-
-        if (isHold && currentActivePieceId && !draggingRef.current) {
-          const currentPlacedPieces = placedPiecesRef.current;
-          const activePiece = currentPlacedPieces.find(p => p.uid === currentActivePieceId);
-          if (activePiece) {
-            // Otáčanie zápästím nakláňa ruku a posúva kurzor – kým trvá (a chvíľu po ňom) sa blok nehýbe:
-            // prebázuj východiskový bod ruky aj bloku, aby po otočení nenastal skok ani zbytočný presun.
-            if (gzTwist !== 0 || twistAccRef.current !== 0) twistQuietUntilRef.current = now + TWIST_QUIET_MS;
-            if (movementStartedRef.current && now < twistQuietUntilRef.current) {
-              gripStartGridRef.current = { x: gridX, y: gridY };
-              gripStartPieceRef.current = { row: activePiece.row, col: activePiece.col };
-            }
-            // Ak práve začal HOLD (prechod z čakania na tap do pohybu)
-            if (!movementStartedRef.current) {
-              const base = gripStartGridRef.current;
-              if (!base || now < twistQuietUntilRef.current) {
-                gripStartGridRef.current = { x: gridX, y: gridY };
-              } else if (!rotSettling && Math.max(Math.abs(gridX - base.x), Math.abs(gridY - base.y)) >= MOVE_START_CELLS) {
-                // Ruka sa naozaj posunula -> začni presun od aktuálnej polohy (bez skoku)
-                saveToHistory(); // pre undo
-                movementStartedRef.current = true;
-                gripStartGridRef.current = { x: gridX, y: gridY };
-                gripStartPieceRef.current = { row: activePiece.row, col: activePiece.col };
-                setIsGripping(true); // Aktivuj vizuálny grip a blokuj kontrolu výhry
-              }
-            }
-            
-            // Vypočítaj relatívny posun od začiatku gripu
-            const startGrid = gripStartGridRef.current;
-            const startPiece = gripStartPieceRef.current;
-            
-            if (startGrid && startPiece) {
-              const deltaX = gridX - startGrid.x;
-              const deltaY = gridY - startGrid.y;
-              
-              // Cieľová pozícia bloku = počiatočná pozícia + posun ruky; blok k nej ide
-              // najviac o 1 bunku na os za tik (žiadne preskakovanie ani "teleport")
-              const targetCol = startPiece.col + deltaX;
-              const targetRow = startPiece.row + deltaY;
-              // Jedna bunka za MOVE_STEP_MS; len dominantná os (druhá až keď je dostatočne veľká) -> žiadne uhlopriečky
-              const dCol = targetCol - activePiece.col;
-              const dRow = targetRow - activePiece.row;
-              const step = pieceStep(dCol, dRow, now - moveLastStepRef.current >= MOVE_STEP_MS);
-              const newCol = activePiece.col + step.dc;
-              const newRow = activePiece.row + step.dr;
-            
-            // Skontroluj či sa pozícia zmenila
-            if (newRow !== activePiece.row || newCol !== activePiece.col) {
-              // Odstráň aktívny blok z gridu
-              const tempGrid = removePiece(gridRef.current, activePiece);
-              
-              // Skontroluj či sa blok zmestí na novú pozíciu
-              const pieceHeight = activePiece.grid.length;
-              const pieceWidth = activePiece.grid[0]?.length || 0;
-              const isInBounds = newRow >= 0 && newCol >= 0 && 
-                                newRow + pieceHeight <= GRID_HEIGHT && 
-                                newCol + pieceWidth <= GRID_WIDTH;
-              
-              if (isInBounds) {
-                // Skontroluj kolíziu s inými blokami
-                let hasCollision = false;
-                const otherPieces = currentPlacedPieces.filter(p => p.uid !== currentActivePieceId);
-                for (const other of otherPieces) {
-                  for (let pr = 0; pr < other.grid.length; pr++) {
-                    for (let pc = 0; pc < other.grid[pr].length; pc++) {
-                      if (other.grid[pr][pc]) {
-                        const otherRow = other.row + pr;
-                        const otherCol = other.col + pc;
-                        
-                        for (let ar = 0; ar < activePiece.grid.length; ar++) {
-                          for (let ac = 0; ac < activePiece.grid[ar].length; ac++) {
-                            if (activePiece.grid[ar][ac]) {
-                              if (newRow + ar === otherRow && newCol + ac === otherCol) {
-                                hasCollision = true;
-                                break;
-                              }
-                            }
-                          }
-                          if (hasCollision) break;
-                        }
-                      }
-                      if (hasCollision) break;
-                    }
-                    if (hasCollision) break;
-                  }
-                  if (hasCollision) break;
-                }
-                
-                // Ak nie je kolízia, presuň blok
-                if (!hasCollision) {
-                  moveLastStepRef.current = now;
-                  const newGrid = placePiece(tempGrid, activePiece.grid, newRow, newCol, activePiece.color);
-                  setGrid(newGrid);
-                  setPlacedPieces(prev => prev.map(p => 
-                    p.uid === currentActivePieceId 
-                      ? { ...p, row: newRow, col: newCol }
-                      : p
-                  ));
-                }
-              }
-            }
-            }
+        // Klávesy R/E majú prednosť: počas ich držania sa vzorky z rukavice ignorujú
+        if (!manip.isKeyRotating()) {
+          // Pri ťahaní myšou, po výhre alebo v modale sa rukavica nepoužíva (rozpracované gesto sa zruší)
+          const ready = !draggingRef.current && playableRef.current;
+          if (input.update({ grip, position, gyro }, performance.now(), ready)) {
+            imuCtrlRef.current?.consumeGyroX(); // flip je vybavený: ďalší až po uvoľnení gyra
           }
         }
 
-        // Aktualizuj debug overlay stav
-        setImuDebug({
-          pitch: Math.round(imuN.pitchDeg * 10) / 10,
-          roll: Math.round(imuN.rollDeg * 10) / 10,
-          yaw: Math.round(imuN.yawDeg * 10) / 10,
-          gyro: out.gyro,
-          linAcc: { x: Math.round(imuN.linAccX*10)/10, y: Math.round(imuN.linAccY*10)/10 },
-          adcMax: Math.max(0, ...((sample.adc || []) as number[]).slice(1,5).map((v: number) => normalizeAdc(v))),
-          grip: out.grip,
-          quat: sample.imu.quatW !== undefined ? {
-            w: sample.imu.quatW ?? 0,  // Už normalizované backendom!
-            x: sample.imu.quatX ?? 0,
-            y: sample.imu.quatY ?? 0,
-            z: sample.imu.quatZ ?? 0,
-          } : undefined,
-        });
-
-        // Zdvihnutie: ak je grip aktívny a ešte nepresúvame, začni presúvať prvý dostupný kúsok
-        if (out.grip && !draggingRef.current) {
-          const available = availableRef.current || [];
-          if (available.length > 0) {
-            const shape = available[0];
-            setDraggingPiece({ shape, grid: shape.grid, offsetX: 0, offsetY: 0 });
-          }
-        }
-
-        // Akcie založené na gyro pri stisnutí: otočenie zápästím (gyroZ) -> rotácia, dopredu/dozadu (gyroY) -> flip
-        // Len pre držaný (novo zdvihnutý) kúsok a len pri skutočnom gripe (všetkých 5 prstov).
-        // Rotáciu/flip umiestnených kúskov riešia bloky vyššie (twist akumulácia a flip),
-        // inak `out.grip` (veľmi citlivý) + prah 10 °/s točil kúsok každých 300 ms.
-        if (out.grip && manualGrip && draggingRef.current) {
-          const gyro = out.gyro || { x: 0, y: 0, z: 0 };
-          const nowMs = Date.now();
-          // Cooldown aby sa predišlo rýchlemu opakovaniu
-          const cooldown = 700;
-          const last = (window as any)._lastGyroActionTs || 0;
-          const flipThresh = 60; // °/s pre flip
-          const rotateThresh = 60; // °/s pre rotáciu
-          if (nowMs - last > cooldown) {
-            if (Math.abs(gyro.z) > rotateThresh) {
-              // Rotácia
-              try { handleRotateDragging(); } catch (e) {}
-              (window as any)._lastGyroActionTs = nowMs;
-            } else if (Math.abs(gyro.y) > flipThresh) {
-              // Flip
-              try { handleFlipDragging(); } catch (e) {}
-              (window as any)._lastGyroActionTs = nowMs;
-            }
-          }
-        }
-
-        // Pustenie: ak je grip uvoľnený a máme presúvaný kúsok, skús ho umiestniť
-        if (!out.grip && draggingRef.current) {
-          const dp = draggingRef.current;
-          // Použi najnovší grid z ref
-          const curGrid = gridRef.current;
-          // Umiestni podľa pozície gridu z IMU (vypočítané skôr)
-          const row = gridY;
-          const col = gridX;
-          if (currentLevel && dp) {
-            // Najprv skús umiestniť do cieľového tvaru, potom hocikam validné
-            const canPlaceTarget = canPlacePiece(curGrid, dp.grid, row, col, currentLevel.targetShape, placedPieces);
-            if (canPlaceTarget) {
-              // Save prior state for undo when placing a newly picked piece
-              if (!dp.originalUid) saveToHistory();
-              const newGrid = placePiece(curGrid, dp.grid, row, col, dp.shape.color);
-              const uid = genUid();
-              const newPiece: PlacedPiece = { shapeId: dp.shape.id, grid: dp.grid, row, col, color: dp.shape.color, uid };
-              setGrid(newGrid);
-              setPlacedPieces((prev) => { const na = [...prev, newPiece]; setActivePieceId(uid); setMovesCount((m)=>m+1); levelUserPlacedRef.current.add(uid); return na; });
-              setAvailablePieces((prev) => prev.filter((p) => p.id !== dp.shape.id));
-            } else {
-              // Ak sa nedá umiestniť do cieľa, skús všeobecné umiestnenie (hranice + kolízia)
-              const pieceHeight = dp.grid.length;
-              const pieceWidth = dp.grid[0]?.length || 0;
-              const isInBounds = row >= 0 && col >= 0 && row + pieceHeight <= GRID_HEIGHT && col + pieceWidth <= GRID_WIDTH;
-              let canPlaceAnywhere = false;
-              if (isInBounds) {
-                // Jednoduchá kontrola kolízie
-                try {
-                  canPlaceAnywhere = canPlacePiece(curGrid, dp.grid, row, col, null as any, placedPieces);
-                } catch (e) { canPlaceAnywhere = false; }
-              }
-              if (canPlaceAnywhere) {
-                // Save prior state for undo when placing a newly picked piece
-                if (!dp.originalUid) saveToHistory();
-                const newGrid = placePiece(curGrid, dp.grid, row, col, dp.shape.color);
-                const uid = genUid();
-                const newPiece: PlacedPiece = { shapeId: dp.shape.id, grid: dp.grid, row, col, color: dp.shape.color, uid };
-                setGrid(newGrid);
-                setPlacedPieces((prev) => { const na = [...prev, newPiece]; setActivePieceId(uid); setMovesCount((m)=>m+1); levelUserPlacedRef.current.add(uid); return na; });
-                setAvailablePieces((prev) => prev.filter((p) => p.id !== dp.shape.id));
-              }
-            }
-          }
-          // Vyčisti presúvanie bez ohľadu na výsledok
-          setDraggingPiece(null);
+        if (showImuDebugRef.current) {
+          setImuDebug({
+            pitch: Math.round(nMain.pitchDeg * 10) / 10,
+            roll: Math.round(nMain.rollDeg * 10) / 10,
+            yaw: Math.round(nMain.yawDeg * 10) / 10,
+            gyro: outMain.gyro,
+            linAcc: { x: Math.round(nMain.linAccX * 10) / 10, y: Math.round(nMain.linAccY * 10) / 10 },
+            adcMax: Math.max(0, ...((sample.adc || []) as number[]).slice(1, 5).map((v: number) => normalizeAdc(v))),
+            grip,
+            quat: sample.imu.quatW !== undefined ? {
+              w: sample.imu.quatW ?? 0,  // Už normalizované backendom!
+              x: sample.imu.quatX ?? 0,
+              y: sample.imu.quatY ?? 0,
+              z: sample.imu.quatZ ?? 0,
+            } : undefined,
+          });
         }
       } catch (err) {
-        // Ignoruj chybu
+        console.warn('Pentomino: chyba pri spracovaní vzorky', err);
       }
     }
 
     const wrappedSample = (ev: Event) => {
-      if ((window as any).__modalOpen) return;
+      if ((window as any).__modalOpen) { inputRef.current?.cancel(); return; }
       onSample(ev as any);
     };
     window.addEventListener('imu-sample', wrappedSample as EventListener);
     return () => window.removeEventListener('imu-sample', wrappedSample as EventListener);
-  }, [currentLevel, placedPieces, wsConnected, isCalibrated, showCalibrationModal, useLeftHand, dualHands]);
+  }, [wsConnected, isCalibrated, showCalibrationModal, useLeftHand, dualHands, cfg]);
 
 
   // Kontrola výhry
@@ -955,7 +749,7 @@ export function PentominoGame({
     if (!currentLevel || placedPieces.length === 0) return;
     
     // Nespúšťaj kontrolu výhry ak je aktívny grip (hráč ešte drží blok)
-    if (wasGrippingRef.current) return;
+    if (grabbedRef.current) return;
     // Nespúšťaj kontrolu výhry ak sa ťahá blok myšou
     if (draggingPiece) return;
 
@@ -1057,6 +851,10 @@ export function PentominoGame({
     setPlacedPieces(previousState.placedPieces);
     setAvailablePieces(previousState.availablePieces);
     setActivePieceId(previousState.activePieceId);
+    gridRef.current = previousState.grid;
+    placedPiecesRef.current = previousState.placedPieces;
+    activePieceIdRef.current = previousState.activePieceId;
+    manipRef.current?.reset();
     
     // Zníž počet ťahov
     setMovesCount(m => Math.max(0, m - 1));
@@ -1068,6 +866,7 @@ export function PentominoGame({
     pieceGrid: boolean[][]
   ) => {
     e.preventDefault();
+    inputRef.current?.cancel(); // myš preberá ovládanie od rukavice
     const rect = e.currentTarget.getBoundingClientRect();
     // Offset je v screen koordinátach (už vyškálovaný) - prepočítaj na pôvodné jednotky
     const currentScale = scaleRef.current || 1;
@@ -1300,74 +1099,18 @@ export function PentominoGame({
     }
   }, [draggingPiece, handleMouseMove, handleMouseUp]);
 
-  // Rotácia aktuálne drženého alebo aktívneho kúska
+  // Rotácia bloku, ktorý práve ťaháš myšou (R). Bloky na mriežke otáča PieceManipulator (klávesy R/E, zápästie).
   const handleRotateDragging = () => {
-    if (draggingPiece) {
-      const rotated = rotatePentomino(draggingPiece.grid);
-      setDraggingPiece({ ...draggingPiece, grid: rotated });
-      // keep breathing animation in sync
-      breatheSyncOffsetRef.current = Date.now() % BREATH_MS;
-    } else if (placedPieces.length > 0) {
-      // Rotuj aktívny kúsok priamo na gride
-      const activePiece = activePieceId ? placedPieces.find(p => p.uid === activePieceId) ?? null : null;
-      if (!activePiece) {
-        return;
-      }
-
-      // Odstráň kúsok z gridu
-      const tempGrid = removePiece(grid, activePiece);
-
-      // Rotuj grid kúska
-      const rotatedGrid = rotatePentomino(activePiece.grid);
-
-      // Skús umiestniť rotovaný kúsok na rovnakú pozíciu
-      // Pri okraji poľa sa kúsok po otočení posunie na najbližšiu platnú pozíciu
-      const pos = findNearestValidPosition(tempGrid, rotatedGrid, activePiece.row, activePiece.col);
-      if (pos) {
-        const newGrid = placePiece(tempGrid, rotatedGrid, pos.row, pos.col, activePiece.color);
-        setGrid(newGrid);
-        setPlacedPieces(prev => prev.map((p) => p.uid === activePiece.uid ? { ...p, grid: rotatedGrid, row: pos.row, col: pos.col } : p));
-        breatheSyncOffsetRef.current = Date.now() % BREATH_MS;
-      } else {
-        // Rotácia blokovaná kolíziou - nevykonaj zmenu
-        setGrid(grid);
-      }
-    }
+    if (!draggingPiece) return;
+    setDraggingPiece({ ...draggingPiece, grid: rotatePentomino(draggingPiece.grid) });
   };
 
-  // Prevrátenie (flip) aktuálne drženého alebo aktívneho kúska
+  // Prevrátenie (F): blok ťahaný myšou sa prevráti hneď, vybraný blok na mriežke s animáciou
   const handleFlipDragging = () => {
     if (draggingPiece) {
-      const flipped = flipPentomino(draggingPiece.grid);
-      setDraggingPiece({ ...draggingPiece, grid: flipped });
-      // keep breathing animation in sync
-      breatheSyncOffsetRef.current = Date.now() % BREATH_MS;
-    } else if (placedPieces.length > 0) {
-      // Flip aktívny kúsok priamo na gride
-      const activePiece = activePieceId ? placedPieces.find(p => p.uid === activePieceId) ?? null : null;
-      if (!activePiece) {
-        return;
-      }
-
-      // Odstráň kúsok z gridu
-      const tempGrid = removePiece(grid, activePiece);
-
-      // Flip grid kúska
-      const flippedGrid = flipPentomino(activePiece.grid);
-
-      // Skús umiestniť flipped kúsok na rovnakú pozíciu
-      // Pri okraji poľa sa kúsok po otočení posunie na najbližšiu platnú pozíciu
-      const pos = findNearestValidPosition(tempGrid, flippedGrid, activePiece.row, activePiece.col);
-      if (pos) {
-        const newGrid = placePiece(tempGrid, flippedGrid, pos.row, pos.col, activePiece.color);
-        setGrid(newGrid);
-        setPlacedPieces(prev => prev.map((p) => p.uid === activePiece.uid ? { ...p, grid: flippedGrid, row: pos.row, col: pos.col } : p));
-        triggerFlipAnim(activePiece.uid);
-        breatheSyncOffsetRef.current = Date.now() % BREATH_MS;
-      } else {
-        // Flip blokovaný kolíziou - nevykonaj zmenu
-        setGrid(grid);
-      }
+      setDraggingPiece({ ...draggingPiece, grid: flipPentomino(draggingPiece.grid) });
+    } else {
+      manipRef.current?.flipSelected();
     }
   };
 
@@ -1411,8 +1154,8 @@ export function PentominoGame({
         return;
       }
       
-      // Plynulú rotáciu (R/E) rieši samostatný effect, ak nedržíme kúsok myšou
-      if (SMOOTH_ROTATE_ENABLED && !draggingPiece && (e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 'e')) return;
+      // Plynulú rotáciu (R/E) rieši samostatný effect, ak nedržíme blok myšou
+      if (!draggingPiece && (e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 'e')) return;
 
       if (e.key.toLowerCase() === 'r') {
         handleRotateDragging();
@@ -1465,150 +1208,59 @@ export function PentominoGame({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [draggingPiece, placedPieces, activePieceId]);
 
-  // === PLYNULÁ ROTÁCIA KLÁVESOM (R = doprava, E = doľava) ===
+  // === KLÁVESY R (doprava) / E (doľava): plynulé otáčanie vybraného bloku, rovnako ako zápästie ===
   const saveToHistoryRef = useRef(saveToHistory);
   useEffect(() => { saveToHistoryRef.current = saveToHistory; }, [saveToHistory]);
 
+  // Potvrdenie bloku po pustení: zapíše novú orientáciu/polohu do mriežky (jediné miesto, kde ruka mení stav hry)
+  commitPieceRef.current = (info) => {
+    const piece = placedPiecesRef.current.find((p) => p.uid === info.uid);
+    if (!piece) return;
+    if (info.changed) {
+      saveToHistoryRef.current(); // pre undo: stav spred zmeny
+      setMovesCount((m) => m + 1);
+    }
+    const newGrid = placePiece(removePiece(gridRef.current, piece), info.grid, info.row, info.col, piece.color);
+    const updated = placedPiecesRef.current.map((p) => (p.uid === info.uid ? { ...p, grid: info.grid, row: info.row, col: info.col } : p));
+    // refy sa nastavia hneď: ďalšia vzorka (zachytenie) môže prísť ešte pred prekreslením
+    gridRef.current = newGrid;
+    placedPiecesRef.current = updated;
+    setGrid(newGrid);
+    setPlacedPieces(updated);
+    // Do štatistiky sa blok započíta, keď celý leží v cieľovom tvare (ako pri položení myšou)
+    const target = currentLevel?.targetShape;
+    const inside = !!target && info.grid.every((row, r) => row.every((v, c) => !v || !!target[info.row + r]?.[info.col + c]));
+    if (inside) levelUserPlacedRef.current.add(info.uid); else levelUserPlacedRef.current.delete(info.uid);
+  };
+  playableRef.current = !!currentLevel && !showRestPopup && !showFinishedModal;
+
   useEffect(() => {
-    if (!SMOOTH_ROTATE_ENABLED) return;
-
-    type Plan = { grid: boolean[][]; row: number; col: number; idealRow: number; idealCol: number };
-    type Rot = {
-      uid: string; angle: number; dir: 1 | -1; heldKey: string; startedAt: number;
-      phase: 'hold' | 'settle'; target: number; plan: Plan | null;
-    };
-    let rot: Rot | null = null;
-    let raf = 0;
-    let lastT = 0;
-    const timers: number[] = [];
-
-    const commit = () => {
-      const r = rot;
-      rot = null;
-      if (r && r.plan) {
-        const plan = r.plan;
-        const piece = placedPiecesRef.current.find((p) => p.uid === r.uid);
-        if (piece) {
-          saveToHistoryRef.current();
-          const tmp = removePiece(gridRef.current, piece);
-          setGrid(placePiece(tmp, plan.grid, plan.row, plan.col, piece.color));
-          setPlacedPieces((prev) => prev.map((p) => (p.uid === r.uid ? { ...p, grid: plan.grid, row: plan.row, col: plan.col } : p)));
-          breatheSyncOffsetRef.current = Date.now() % BREATH_MS;
-          // Nový tvar má stred o kúsok inde (celé bunky) – zjemni skok krátkym dorovnaním
-          const tx = (plan.idealCol - plan.col) * CELL_SIZE;
-          const ty = (plan.idealRow - plan.row) * CELL_SIZE;
-          setRotVisual({ uid: r.uid, angle: 0, tx, ty, ease: false });
-          timers.push(window.setTimeout(() => setRotVisual((v) => (v && v.uid === r.uid ? { ...v, tx: 0, ty: 0, ease: true } : v)), 30));
-          timers.push(window.setTimeout(() => setRotVisual(null), 30 + ROTATE_EASE_MS + 30));
-          return;
-        }
-      }
-      setRotVisual(null);
-    };
-
-    const frame = (t: number) => {
-      if (!rot) return;
-      const dt = Math.min(0.05, (t - lastT) / 1000);
-      lastT = t;
-      let done = false;
-      if (rot.phase === 'hold') {
-        if (rot.heldKey !== 'wrist') rot.angle = Math.max(-270, Math.min(270, rot.angle + rot.dir * ROTATE_SPEED_DPS * dt));
-      } else {
-        const diff = rot.target - rot.angle;
-        const step = ROTATE_SPEED_DPS * ROTATE_SETTLE_FACTOR * dt;
-        if (Math.abs(diff) <= step) { rot.angle = rot.target; done = true; }
-        else rot.angle += Math.sign(diff) * step;
-      }
-      setRotVisual({ uid: rot.uid, angle: rot.angle, tx: 0, ty: 0, ease: false });
-      if (done) commit();
-      else raf = requestAnimationFrame(frame);
-    };
-
-    const release = () => {
-      if (!rot || rot.phase !== 'hold') return;
-      const piece = placedPiecesRef.current.find((p) => p.uid === rot!.uid);
-      if (!piece) { rot = null; setRotVisual(null); cancelAnimationFrame(raf); return; }
-
-      // Najbližší násobok 90° (±45° je hranica); veľmi krátke ťuknutie = celý krok
-      let steps = Math.round(rot.angle / 90);
-      if (steps === 0 && ROTATE_TAP_MS > 0 && performance.now() - rot.startedAt < ROTATE_TAP_MS) steps = rot.dir;
-      const quarter = ((steps % 4) + 4) % 4;
-      let target = steps * 90;
-      let plan: Plan | null = null;
-
-      if (quarter !== 0) {
-        let g = piece.grid;
-        for (let i = 0; i < quarter; i++) g = rotatePentomino(g);
-        const tmp = removePiece(gridRef.current, piece);
-        const idealRow = piece.row + (piece.grid.length - g.length) / 2;
-        const idealCol = piece.col + (piece.grid[0].length - g[0].length) / 2;
-        const pos = findNearestValidPosition(tmp, g, Math.round(idealRow), Math.round(idealCol));
-        if (pos) plan = { grid: g, row: pos.row, col: pos.col, idealRow, idealCol };
-        else target = 0; // nikde sa nezmestí – vráť späť
-      }
-      rot.phase = 'settle';
-      rot.target = target;
-      rot.plan = plan;
-    };
-
     const onKeyDown = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
       if (k !== 'r' && k !== 'e') return;
       if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
       if ((window as any).__modalOpen) return;
-      if (wsConnected && !isCalibrated && showCalibrationModal) return;
-      if (draggingRef.current || rot) return; // držaný kúsok rieši pôvodný handler
-      const uid = activePieceIdRef.current;
-      if (!uid || !placedPiecesRef.current.some((p) => p.uid === uid)) return;
-      rot = { uid, angle: 0, dir: k === 'r' ? 1 : -1, heldKey: k, startedAt: performance.now(), phase: 'hold', target: 0, plan: null };
-      lastT = performance.now();
-      raf = requestAnimationFrame(frame);
+      if (wsConnected && !isCalibrated) return; // pripojená, ale nekalibrovaná rukavica: klávesy sú zamknuté
+      if (draggingRef.current) return;          // blok ťahaný myšou rieši handleRotateDragging
+      const input = inputRef.current, manip = manipRef.current;
+      if (!input || !manip || input.gripping) return;
+      if (!manip.keyDown(k)) return;
+      e.preventDefault();
+      input.cancel(); // po klávese treba pred ďalším stiskom rukavice uvoľniť prsty
     };
-    // Zápästie (IMU) riadi tú istú rotáciu ako klávesy: 'piece-twist' {uid, angle} / {release}
-    rotSettlingFnRef.current = () => !!rot && rot.phase === 'settle';
-    const onTwist = (ev: Event) => {
-      const d = (ev as CustomEvent).detail || {};
-      if (d.release) {
-        if (rot && rot.heldKey === 'wrist' && rot.phase === 'hold') {
-          release();
-          lastT = performance.now();
-          raf = requestAnimationFrame(frame);
-        }
-        return;
-      }
-      if (draggingRef.current || typeof d.angle !== 'number' || !d.uid) return;
-      if (rot && (rot.heldKey !== 'wrist' || rot.phase !== 'hold')) return; // klávesy majú prednosť
-      if (!rot) {
-        if (!placedPiecesRef.current.some((p) => p.uid === d.uid)) return;
-        rot = { uid: d.uid, angle: d.angle, dir: d.angle >= 0 ? 1 : -1, heldKey: 'wrist', startedAt: -1e9, phase: 'hold', target: 0, plan: null };
-      } else {
-        rot.angle = d.angle;
-        rot.dir = d.angle >= 0 ? 1 : -1;
-      }
-      setRotVisual({ uid: rot.uid, angle: rot.angle, tx: 0, ty: 0, ease: false });
-    };
-    window.addEventListener('piece-twist', onTwist);
-
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (rot && e.key.toLowerCase() === rot.heldKey) release();
-    };
-    const onBlur = () => release();
-
+    const onKeyUp = (e: KeyboardEvent) => manipRef.current?.keyUp(e.key.toLowerCase());
+    const onBlur = () => manipRef.current?.keyUp();
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
     return () => {
-      window.removeEventListener('piece-twist', onTwist);
-      rotSettlingFnRef.current = null;
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
-      cancelAnimationFrame(raf);
-      timers.forEach((t) => window.clearTimeout(t));
-      rot = null;
-      setRotVisual(null);
     };
-  }, [wsConnected, isCalibrated, showCalibrationModal, CELL_SIZE]);
+  }, [wsConnected, isCalibrated]);
 
   if (!currentLevel) {
     return (
@@ -1704,6 +1356,11 @@ export function PentominoGame({
 
   return (
     <div className="fixed inset-0 h-screen w-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 overflow-hidden">
+      {handRolled && (
+        <div className="fixed bottom-3 left-3 z-[9000] px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-sm font-medium shadow">
+          Rukavica otočená – použité osi pre otočenú polohu
+        </div>
+      )}
       {showFinishedModal && (
         <ModalBackdrop>
           <GameFinishedModal
@@ -1787,8 +1444,9 @@ export function PentominoGame({
           <div className="flex flex-col gap-4">
             <div
               id="pentomino-grid"
-              className="relative bg-white rounded-2xl shadow-2xl p-3 transition-shadow duration-200"
+              className="relative rounded-2xl shadow-2xl p-3 transition-shadow duration-200"
               style={{
+                backgroundColor: BOARD_FRAME,
                 width: GRID_WIDTH * CELL_SIZE + 24,
                 height: GRID_HEIGHT * CELL_SIZE + 24,
                 boxShadow: (isGripping || draggingPiece) 
@@ -1806,68 +1464,112 @@ export function PentominoGame({
                 </div>
               )}
 
-              {/* Čiary mriežky */}
+              {/* Hracie pole: viditeľné bunky (predtým biele s takmer neviditeľnými čiarami), každá 5. čiara výraznejšia na orientáciu */}
               <div
-                className="absolute inset-3 grid"
+                className="absolute inset-3 pointer-events-none"
                 style={{
-                  gridTemplateColumns: `repeat(${GRID_WIDTH}, ${CELL_SIZE}px)`,
-                  gridTemplateRows: `repeat(${GRID_HEIGHT}, ${CELL_SIZE}px)`,
+                  backgroundColor: BOARD_CELL,
+                  backgroundImage: [
+                    `linear-gradient(to right, ${BOARD_LINE_MAJOR} 2px, transparent 2px)`,
+                    `linear-gradient(to bottom, ${BOARD_LINE_MAJOR} 2px, transparent 2px)`,
+                    `linear-gradient(to right, ${BOARD_LINE} 1px, transparent 1px)`,
+                    `linear-gradient(to bottom, ${BOARD_LINE} 1px, transparent 1px)`,
+                  ].join(', '),
+                  backgroundSize: `${CELL_SIZE * 5}px ${CELL_SIZE * 5}px, ${CELL_SIZE * 5}px ${CELL_SIZE * 5}px, ${CELL_SIZE}px ${CELL_SIZE}px, ${CELL_SIZE}px ${CELL_SIZE}px`,
+                  borderRight: `1px solid ${BOARD_LINE}`,
+                  borderBottom: `1px solid ${BOARD_LINE}`,
                 }}
-              >
-                {Array.from({
-                  length: GRID_WIDTH * GRID_HEIGHT,
-                }).map((_, i) => (
-                  <div key={i} className="border border-slate-200" />
-                ))}
-              </div>
+              />
 
               {/* Cieľový tvar (obrysy) */}
+              {/* Len vonkajší obrys cieľa: čiara sa kreslí iba tam, kde susedná bunka nie je súčasťou cieľa */}
               {currentLevel.targetShape.map((row, r) =>
-                row.map((cell, c) =>
-                  cell ? (
+                row.map((cell, c) => {
+                  if (!cell) return null;
+                  const t = currentLevel.targetShape;
+                  const edge = (rr: number, cc: number) => (t[rr]?.[cc] ? '0px' : '4px');
+                  return (
                     <div
                       key={`target-${r}-${c}`}
-                      className="absolute border-4 rounded pointer-events-none"
+                      className="absolute pointer-events-none"
                       style={{
-                        left: 12 + c * CELL_SIZE + 3,
-                        top: 12 + r * CELL_SIZE + 3,
-                        width: CELL_SIZE - 6,
-                        height: CELL_SIZE - 6,
-                        borderColor: '#94a3b8',
-                        opacity: 0.4,
+                        left: 12 + c * CELL_SIZE,
+                        top: 12 + r * CELL_SIZE,
+                        width: CELL_SIZE,
+                        height: CELL_SIZE,
+                        boxSizing: 'border-box',
+                        borderStyle: 'solid',
+                        borderColor: '#000000',
+                        backgroundColor: TARGET_FILL, // cieľová plocha je zreteľne odlíšená od zvyšku poľa
+                        borderTopWidth: edge(r - 1, c),
+                        borderBottomWidth: edge(r + 1, c),
+                        borderLeftWidth: edge(r, c - 1),
+                        borderRightWidth: edge(r, c + 1),
                       }}
                     />
-                  ) : null
-                )
+                  );
+                })
               )}
 
+              {/* Náhľad dosadnutia držaného bloku: kam dosadne po uvoľnení prstov */}
+              {snap.live?.ghost && (() => {
+                const g = snap.live.ghost;
+                const color = placedPieces.find((p) => p.uid === snap.live!.uid)?.color ?? '#64748b';
+                return g.grid.map((row, r) =>
+                  row.map((cell, c) =>
+                    cell ? (
+                      <div
+                        key={`ghost-${r}-${c}`}
+                        className="absolute rounded pointer-events-none"
+                        style={{
+                          left: 12 + (g.col + c) * CELL_SIZE + 3,
+                          top: 12 + (g.row + r) * CELL_SIZE + 3,
+                          width: CELL_SIZE - 6,
+                          height: CELL_SIZE - 6,
+                          border: `3px dashed ${color}`,
+                          backgroundColor: `color-mix(in srgb, ${color} 18%, transparent)`,
+                          opacity: 0.85,
+                        }}
+                      />
+                    ) : null
+                  )
+                );
+              })()}
+
               {/* Umiestnené kúsky */}
-              {placedPieces.map((piece, index) => (
+              {placedPieces.map((piece, index) => {
+                // Blok, ktorý práve drží/otáča ruka alebo klávesy, sa kreslí z desatinnej polohy a uhla (bez skokov po bunkách)
+                const live = snap.live && snap.live.uid === piece.uid ? snap.live : null;
+                const pg = live ? live.grid : piece.grid;
+                const pw = pg[0]?.length ?? 0;
+                const ph = pg.length;
+                const isActive = piece.uid === activePieceId;
+                const isHover = !live && !isActive && piece.uid === snap.hoverUid;
+                // Obrys celého bloku (nie jednotlivých buniek): štyri posunuté tiene
+                const o = SELECTED_OUTLINE;
+                const filters: string[] = [];
+                if (isActive) filters.push(`drop-shadow(3px 0 0 ${o})`, `drop-shadow(-3px 0 0 ${o})`, `drop-shadow(0 3px 0 ${o})`, `drop-shadow(0 -3px 0 ${o})`, 'drop-shadow(0 0 10px rgba(255, 153, 0, 0.9))');
+                if (isHover) filters.push('drop-shadow(0 0 5px rgba(23, 100, 125, 0.9))');
+                if (live?.grabbed) filters.push('drop-shadow(0 8px 10px rgba(0, 0, 0, 0.35))');
+                return (
                 <div
-                  key={`placed-${piece.uid ?? index}${flipAnim && flipAnim.uid === piece.uid ? `-f${flipAnim.n}` : ''}`}
-                  className={`absolute transition-all ${piece.uid === activePieceId ? 'cursor-move' : 'cursor-pointer'}`}
+                  key={`placed-${piece.uid ?? index}`}
+                  className={`absolute ${isActive ? 'cursor-move' : 'cursor-pointer'}${isActive && !live ? ' piece-selected-pulse' : ''}`}
                   style={{
-                    left: 12 + piece.col * CELL_SIZE,
-                    top: 12 + piece.row * CELL_SIZE,
-                    // Plynulé kĺzanie po bunkách pri presúvaní (namiesto skokov)
-                    transition: 'left 90ms linear, top 90ms linear', // plynulý posun medzi bunkami (krok bloku je MOVE_STEP_MS)
-                    ...(rotVisual && rotVisual.uid === piece.uid
+                    left: live ? 12 + (live.cx - pw / 2) * CELL_SIZE : 12 + piece.col * CELL_SIZE,
+                    top: live ? 12 + (live.cy - ph / 2) * CELL_SIZE : 12 + piece.row * CELL_SIZE,
+                    // Rozmery len počas ťahania/otáčania (transform-origin = stred bloku); inak by prázdne rohy boli klikateľné
+                    ...(live
                       ? {
-                          width: (piece.grid[0]?.length ?? 0) * CELL_SIZE,
-                          height: piece.grid.length * CELL_SIZE,
+                          width: pw * CELL_SIZE,
+                          height: ph * CELL_SIZE,
                           transformOrigin: '50% 50%',
-                          transform: `translate(${rotVisual.tx}px, ${rotVisual.ty}px) rotate(${rotVisual.angle}deg)`,
-                          transition: rotVisual.ease ? `transform ${ROTATE_EASE_MS}ms ease-out` : 'none',
+                          transform: `rotate(${live.angle}deg) scaleX(${live.flipScale})`,
+                          zIndex: 30,
+                          pointerEvents: 'none' as const,
                         }
                       : {}),
-                    // Rozmery len počas animácie (transform-origin = stred kúska); inak by prázdne rohy boli klikateľné
-                    ...(flipAnim && flipAnim.uid === piece.uid
-                      ? {
-                          width: (piece.grid[0]?.length ?? 0) * CELL_SIZE,
-                          height: piece.grid.length * CELL_SIZE,
-                          animation: `piece-flip ${SMOOTH_FLIP_MS}ms ease-in-out`,
-                        }
-                      : {}),
+                    filter: filters.length ? filters.join(' ') : undefined,
                   }}
                   onClick={() => {
                     // Kliknutím sa prepne na tento kúsok
@@ -1881,6 +1583,8 @@ export function PentominoGame({
                     }
 
                     e.preventDefault();
+                    inputRef.current?.cancel(); // myš preberá ovládanie od rukavice
+                    manipRef.current?.reset();
                     const rect = e.currentTarget.getBoundingClientRect();
                     // Offset je v screen koordinátach (už vyškálovaný) - prepočítaj na pôvodné jednotky
                     const currentScale = scaleRef.current || 1;
@@ -1908,32 +1612,20 @@ export function PentominoGame({
                     setDragPosition({ x: e.clientX, y: e.clientY });
                   }}
                 >
-                  {piece.grid.map((row, r) =>
+                  {pg.map((row, r) =>
                     row.map((cell, c) =>
                       cell ? (
-                          <div
+                        <div
                           key={`cell-${r}-${c}`}
-                          className="absolute rounded transition-all duration-200 hover:opacity-90"
+                          className="absolute rounded"
                           style={{
                             left: c * CELL_SIZE + 3,
                             top: r * CELL_SIZE + 3,
                             width: CELL_SIZE - 6,
                             height: CELL_SIZE - 6,
+                            backgroundColor: piece.color,
                           }}
                         >
-                          {/* Výplň kúska. Ak je kúsok aktívny, zobrazíme LEN animovanú výplň */}
-                          {piece.uid === activePieceId ? (
-                            <div
-                              className="absolute inset-0 rounded fill-breathe pointer-events-none" key={`breathe-${breatheSyncOffsetRef.current}`}
-                              style={{ backgroundColor: piece.color, opacity: 1, animationDelay: `-${breatheSyncOffsetRef.current}ms` }}
-                            />
-                          ) : (
-                            <div
-                              className="w-full h-full rounded"
-                              style={{ backgroundColor: piece.color, opacity: 1 }}
-                            />
-                          )}
-
                           {/* Farebný obrys */}
                           <div
                             className="absolute inset-0 rounded border-4 pointer-events-none"
@@ -1946,7 +1638,29 @@ export function PentominoGame({
                     )
                   )}
                 </div>
-              ))}
+                );
+              })}
+
+              {calibProg > 0 && (
+                <div className="absolute left-1/2 top-2 -translate-x-1/2 z-[70] bg-white/90 rounded-lg shadow px-3 py-2 text-sm text-slate-700 pointer-events-none">
+                  Kalibrácia polohy… držte prsty stisnuté bez pohybu 3 s (kurzor sa presunie do stredu)
+                  <div className="h-2 mt-1 bg-slate-200 rounded-full overflow-hidden"><div className="h-full bg-orange-500" style={{ width: `${calibProg * 100}%` }} /></div>
+                </div>
+              )}
+
+              {/* Kurzor rukavice: biely kruh s krížom, pri plnom stisku oranžový */}
+              {/* poloha a farba sa nastavujú priamo v drawCursor (bez prekreslenia Reactu) */}
+              <div
+                ref={cursorElRef}
+                aria-hidden
+                className="pentomino-glove-cursor absolute pointer-events-none"
+                style={{ left: 0, top: 0, zIndex: 60, display: 'none', willChange: 'transform' }}
+              >
+                <svg width="40" height="40" viewBox="-20 -20 40 40" style={{ overflow: 'visible' }}>
+                  <circle r="11" fill="white" fillOpacity="0.7" strokeWidth="3" />
+                  <path d="M -17 0 H 17 M 0 -17 V 17" strokeWidth="2.5" strokeLinecap="round" />
+                </svg>
+              </div>
             </div>
           </div>
 
@@ -1988,110 +1702,6 @@ export function PentominoGame({
               </div>
             </div>
 
-            {/* Aktívny kúsok carousel */}
-            {(placedPieces.length > 0 || draggingPiece) && (
-              <div className="mb-4 bg-purple-50 rounded-xl p-4">
-                <p className="mb-2 text-purple-700 text-lg font-bold text-center">
-                  Aktívny blok ({(() => {
-                    // Ak sa draguje, použi originalUid z draggingPiece
-                    const effectiveActiveId = draggingPiece?.originalUid ?? activePieceId;
-                    // Počítaj index vrátane dragovaného kúsku
-                    const allPieces = draggingPiece
-                      ? [...placedPieces, { uid: draggingPiece.originalUid, shapeId: draggingPiece.shape.id, grid: draggingPiece.grid, row: 0, col: 0, color: draggingPiece.shape.color }]
-                      : placedPieces;
-                    const idx = effectiveActiveId ? allPieces.findIndex(p => p.uid === effectiveActiveId) : -1;
-                    return idx >= 0 ? idx + 1 : 1;
-                  })()}/{draggingPiece ? placedPieces.length + 1 : placedPieces.length})
-                </p>
-                <div className="flex flex-col gap-1.5">
-
-                  {/* Aktuálny kúsok */}
-                  {(() => {
-                    const effectiveActiveId = draggingPiece?.originalUid ?? activePieceId;
-                    const allPieces = draggingPiece 
-                      ? [...placedPieces, { uid: draggingPiece.originalUid, shapeId: draggingPiece.shape.id, grid: draggingPiece.grid, row: 0, col: 0, color: draggingPiece.shape.color }]
-                      : placedPieces;
-                    const active = effectiveActiveId ? allPieces.find(p => p.uid === effectiveActiveId) ?? allPieces[0] : allPieces[0];
-                    if (!active) return null;
-                    
-                    // Vypočítaj skutočnú šírku a výšku bloku
-                    const blockWidth = active.grid[0]?.length || 0;
-                    const blockHeight = active.grid.length;
-                    const cellSize = 14;
-                    const offsetX = (90 - blockWidth * cellSize) / 2;
-                    const offsetY = (60 - blockHeight * cellSize) / 2;
-                    
-                      return (
-                      <div className="bg-white rounded-lg p-2 border-2 border-purple-400 shadow-md flex justify-center items-center">
-                        <div className="relative" style={{ width: '90px', height: '60px' }}>
-                          {active.grid.map((row, r) =>
-                            row.map((cell, c) =>
-                              cell ? (
-                                <div
-                                  key={`active-${r}-${c}`}
-                                  className="absolute rounded"
-                                  style={{
-                                    left: offsetX + c * cellSize,
-                                    top: offsetY + r * cellSize,
-                                    width: cellSize,
-                                    height: cellSize,
-                                    backgroundColor: active.color,
-                                  }}
-                                />
-                              ) : null
-                            )
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })()}
-
-                  {/* Nasledujúci kúsok */}
-                  {(() => {
-                    const effectiveActiveId = draggingPiece?.originalUid ?? activePieceId;
-                    const allPieces = draggingPiece 
-                      ? [...placedPieces, { uid: draggingPiece.originalUid, shapeId: draggingPiece.shape.id, grid: draggingPiece.grid, row: 0, col: 0, color: draggingPiece.shape.color }]
-                      : placedPieces;
-                    const currentIdx = effectiveActiveId ? allPieces.findIndex(p => p.uid === effectiveActiveId) : 0;
-                    const nextIdx = currentIdx < allPieces.length - 1 ? currentIdx + 1 : 0;
-                    const nextPiece = allPieces[nextIdx];
-                    if (!nextPiece || allPieces.length < 2) return null;
-                    
-                    // Vypočítaj skutočnú šírku a výšku bloku
-                    const blockWidth = nextPiece.grid[0]?.length || 0;
-                    const blockHeight = nextPiece.grid.length;
-                    const cellSize = 10;
-                    const offsetX = (70 - blockWidth * cellSize) / 2;
-                    const offsetY = (40 - blockHeight * cellSize) / 2;
-                    
-                    return (
-                      <div className="bg-white/50 rounded-lg p-1.5 opacity-60 flex justify-center items-center">
-                        <div className="relative" style={{ width: '70px', height: '40px' }}>
-                          {nextPiece.grid.map((row, r) =>
-                            row.map((cell, c) =>
-                              cell ? (
-                                <div
-                                  key={`next-${r}-${c}`}
-                                  className="absolute rounded"
-                                  style={{
-                                    left: offsetX + c * cellSize,
-                                    top: offsetY + r * cellSize,
-                                    width: cellSize,
-                                    height: cellSize,
-                                    backgroundColor: nextPiece.color,
-                                  }}
-                                />
-                              ) : null
-                            )
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            )}
-
             {/* Inštrukcie pre ovládanie */}
             <div className="rounded-xl bg-blue-50 p-4">
                 <h3 className="text-lg font-bold text-blue-900 mb-3 flex items-center gap-2">
@@ -2099,24 +1709,24 @@ export function PentominoGame({
                 </h3>
                 <div className="space-y-2 text-md text-blue-700">
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-orange-500"></div>
-                    <p><span className="font-semibold">Ovládanie →</span> Stlačenie všetkých 5 prstov</p>
+                    <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                    <p><span className="font-semibold">Náklon ruky (prsty voľné) →</span> Pohyb kurzora</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-blue-500"></div>
-                    <p><span className="font-semibold">Pohyb rukou →</span> Blok sa posúva</p>
+                    <div className="w-2 h-2 rounded-full bg-orange-500"></div>
+                    <p><span className="font-semibold">Stisk 5 prstov nad blokom →</span> Chytiť a presúvať naklonením ruky</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                    <p><span className="font-semibold">Otočenie zápästia →</span> Otočenie bloku</p>
+                    <p><span className="font-semibold">Otočenie zápästia pri stisku →</span> Plynulé otočenie bloku</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-yellow-500"></div>
-                    <p><span className="font-semibold">Ohýbanie zápästia →</span> Prevrátenie bloku</p>
+                    <p><span className="font-semibold">Kývnutie zápästia pri stisku →</span> Prevrátenie bloku</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-red-500"></div>
-                    <p><span className="font-semibold">Dvojité stlačenie →</span> Prepnutie bloku</p>
+                    <p><span className="font-semibold">Uvoľnenie prstov →</span> Blok sa prichytí na mriežku</p>
                   </div>
                 </div>
               </div>
