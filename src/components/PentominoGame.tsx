@@ -394,6 +394,7 @@ export function PentominoGame({
       imuCtrlRef.current.autoReach = false;
       imuCtrlRef.current.autoReachTarget = 0.6;
       imuCtrlRef.current.autoAxes = false;
+      imuCtrlRef.current.axes3d = true; // zvyčajná poloha: 3D osi (imuController.NORMAL_PROFILE)
       imuCtrlRef.current.rolledTune = { up: 1.4, down: 1.7, shear: -0.2, right: 1, left: 1 }; // len otočená poloha; ladenie: localStorage 'rehapiano.drawRolled' (rovnaké ako v kreslení)
       try {
         const raw = localStorage.getItem('rehapiano.drawRolled');

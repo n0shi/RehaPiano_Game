@@ -4,6 +4,7 @@
 //   tools/replay.sh tools/recordings/pose_20261102_110016            (menu preset)
 //   tools/replay.sh --preset game tools/recordings/pose_*            (Pentomino/drawing preset, several recordings)
 //   tools/replay.sh --no-rest-recenter <rec>                         (zero only at the first sample; tests automatic pose detection)
+//   tools/replay.sh --no-axes3d <rec>                                (old normal-pose model: 62 degree rotation + shear)
 //
 // Columns per direction step (A_right, B_up, ...), cursor in screen units (1 = half of the screen, x right, y down):
 //   reach  - how far the cursor went in the asked direction (98th percentile)
@@ -23,10 +24,12 @@ const SCREEN = { w: 1920, h: 1080 };
 const args = process.argv.slice(2);
 let preset: 'menu' | 'game' = 'menu';
 let restRecenter = true;
+let axes3d = true;
 const recs: string[] = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--preset') preset = args[++i] as any;
   else if (args[i] === '--no-rest-recenter') restRecenter = false;
+  else if (args[i] === '--no-axes3d') axes3d = false;
   else recs.push(args[i]);
 }
 if (!recs.length) { console.error('usage: tools/replay.sh [--preset menu|game] [--no-rest-recenter] <recording dir or samples.jsonl> ...'); process.exit(1); }
@@ -34,6 +37,7 @@ if (!recs.length) { console.error('usage: tools/replay.sh [--preset menu|game] [
 function makeController(): SingleIMUController {
   const c = new SingleIMUController();
   c.gyroDivisor = 1; c.linearTilt = true; c.angleTilt = true; c.precisionScale = 1; c.tiltMax = 4; c.posLimit = 4;
+  c.axes3d = axes3d;
   if (preset === 'menu') { // as in MenuCursor.tsx
     c.oneEuro = true; c.tiltDeadzone = 0.035; c.autoReach = false; c.autoAxes = false;
     c.rolledTune = { up: 1.4, down: 1.7, shear: -0.2 };

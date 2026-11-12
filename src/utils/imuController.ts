@@ -86,6 +86,20 @@ export const ROLLED_PROFILE: AxisProfile = {
   gains: { right: 1, left: 1, up: 1.0, down: 1.0 },
 };
 /**
+ * 3D osi pre zvyčajnú polohu pravej rukavice (SingleIMUController.axes3d). Senzor je v rukavici natočený v priestore, nie len v rovine:
+ * zvislý pohyb zápästia má výraznú zložku okolo osi Z senzora (0,3–0,44), ktorú pôvodný model (zložky X/Y rotačného vektora otočené o 62°)
+ * zahadzoval. Osi sú priemer hlavných smerov pohybu z troch sedení (pose_20261026_085327, pose_20261102_073121, pose_20261102_110016;
+ * pose_20261026_083246 je vynechaný – pohyb do strán sa tam robil krútením predlaktia). Overenie "vynechaj jedno sedenie": bočná odchýlka
+ * 0,10 / 0,08 / 0,17 oproti 0,22 / 0,20 / 0,21 pri pôvodnom modeli. Mapa je čisto lineárna, takže nezávisí od toho, kde sa náklon vynuloval.
+ * eH/eV sú priemetové vektory (rx = rv·eH, ry = rv·eV): "vpravo" a "dole" na obrazovke.
+ */
+export const NORMAL_PROFILE: AxisProfile = {
+  roll: 52,
+  eH: [-0.567, -0.81, 0.151],
+  eV: [0.806, -0.473, 0.357],
+  gains: { right: 1, left: 1, up: 1, down: 1 },
+};
+/**
  * Otočená poloha sa pozná podľa absolútneho krútenia rukavice (uhol vektora "hore" v rovine X/Y senzora, nezávislý od yaw a kalibrácie):
  * základná poloha má ~+52° (namerané 50–56°), otočená ~-6…-25°. Hranica medzi nimi je ROLLED_ROLL_MAX_DEG.
  */
@@ -368,6 +382,9 @@ export class SingleIMUController {
   // true = izotropný náklon (kruhová mŕtva zóna a kruhové obmedzenie, žiadne tanh po osiach),
   // takže diagonály sú rovnako dosiahnuteľné ako osi. Používa kurzor v menu/kalibrácii; hry ostávajú na false.
   public linearTilt = false;
+  // true = zvyčajná poloha pravej ruky používa 3D osi NORMAL_PROFILE namiesto otočenia o 62° + shear + gains (tie sa vtedy nepoužijú).
+  // Ľavá ruka ostáva na pôvodnom modeli (pre ňu nie sú záznamy). Otočená poloha a ručná "Kalibrácia osí" sa nemenia.
+  public axes3d = false;
   // Otočenie vektora náklonu (°) v rovine X/Y: senzor v rukavici je voči ruke natočený (~46°), takže pohyb doprava
   // išiel šikmo dole a hore/dole šikmo do strán. Namerané z nahrávky (zhoda všetkých 4 smerov). 0 = bez korekcie.
   public tiltRotationDeg = 0;
@@ -658,7 +675,8 @@ export class SingleIMUController {
       }
       this.lastRv = rotVec(q);
       const builtin = !this.activeProfile && this.isRolled;
-      const prof = this.activeProfile ?? (builtin ? ROLLED_PROFILE : null);
+      const normal3d = !this.activeProfile && !this.isRolled && this.axes3d && this.screenFlipX; // screenFlipX = pravá ruka
+      const prof = this.activeProfile ?? (builtin ? ROLLED_PROFILE : normal3d ? NORMAL_PROFILE : null);
       if (this.pointerTilt) {
         legacyCorr = false;
         const pa = pointerAngles(imu.quat);
@@ -680,7 +698,7 @@ export class SingleIMUController {
           ny = vy * k * precision;
         }
       } else if (prof) {
-        if (builtin) legacyCorr = false; // vstavané osi sú už zarovnané s obrazovkou: bez natočenia 46°, shear a gains
+        if (builtin || normal3d) legacyCorr = false; // vstavané osi sú už zarovnané s obrazovkou: bez natočenia, shear a gains
         // osi "vpravo" a "dole" naučené z pohybov v tejto polohe rukavice (promietnutie rotačného vektora)
         let rx: number, ry: number;
         if (prof.mx && prof.my) {

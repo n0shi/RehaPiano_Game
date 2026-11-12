@@ -244,6 +244,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
       c.cellHysteresis = 0.3;
       // žiadna mŕtva zóna v strede ani saturácia na okraji: kurzor ide presne za rukou
       c.tiltDeadzone = 0;
+      c.axes3d = true; // zvyčajná poloha: 3D osi (imuController.NORMAL_PROFILE)
       c.autoReach = false; // pri kreslení pevné lineárne zosilnenie: meniace sa zosilnenie podľa smeru pôsobilo ako stena
       c.autoAxes = false; // pri kreslení pevné vstavané osi otočenej polohy: priebežné učenie osí (a osi naučené v menu) kurzorom počas kruhu cukalo
       // otočená poloha (kosť na 90°) – rovnaké doladenie zvislých pohybov ako v menu; zvyčajnú polohu sa netýka. Laditeľné v konzole:
