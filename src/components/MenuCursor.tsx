@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
-import { pressedCountOf } from '../utils/fingerCalibration';
+import { gripOf } from '../utils/fingerCalibration';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 
@@ -9,7 +9,6 @@ import { useConfig } from '../config/ConfigContext';
 // Je úplne oddelený od ovládania v hrách: má vlastný SingleIMUController, vlastné počúvanie
 // 'imu-sample' a nikam nezapisuje stav hry. Klik = stisk všetkých 5 prstov.
 
-const CLICK_FINGERS = 5;        // koľko prstov musí byť stlačených pre klik
 const SCREEN_GAIN = 1.0;        // citlivosť: 1 = plný náklon pokryje celú obrazovku
 // Vyhladenie: kontrolér má One Euro filter (ako v Pentomine) – v pokoji silno vyhladí chvenie, pri pohybe takmer bez oneskorenia.
 // Predtým tu boli dve EMA za sebou (kontrolér 0,28 + obrazovka 0,35 ≈ 40 ms oneskorenia), kurzor preto za rukou "ťahal".
@@ -23,8 +22,6 @@ const CALIB_SHOW_MS = 500;      // priebeh vynulovania sa zobrazí až po tejto 
 // Rovnako ako v Pentomine a v kreslení: uvoľnenie prstov samo nakloní rukavicu, kurzor preto chvíľu stojí a potom sa nulový bod
 // vynuluje v polohe otvorenej ruky (počas stisku kurzor stojí, takže by inak po uvoľnení skočil tam, kam sa ruka medzitým pohla).
 const RELEASE_FREEZE_MS = 350;
-// Výpadok jedného prsta (4 z 5) sa za uvoľnenie považuje až po tomto čase (pohyb zápästia mení napätie tenzometrov).
-const GRIP_DROPOUT_MS = 250;
 const HOVER_ATTR = 'data-imu-hover';
 
 type Props = {
@@ -92,7 +89,6 @@ export function MenuCursor({ screen, leftHand }: Props) {
     let calibDoneTimer = 0;
     let lastSampleTs = 0;
     let hovered: Element | null = null;
-    let gripLostAt = 0;
     let releaseUntil = 0;         // kurzor stojí po uvoľnení prstov do tohto času (0 = nie)
     let lastNx = 0, lastNy = 0;   // náklon z poslednej vzorky (px), na dorovnanie kotvy bez skoku
 
@@ -166,13 +162,7 @@ export function MenuCursor({ screen, leftHand }: Props) {
       if (ctrl.recenterSeq !== seqBefore) { anchor.x = pos.x; anchor.y = pos.y; } // kontrolér sám vynuloval náklon: kurzor ostane na mieste
 
       // Stisk prstov (rovnaké prahy ako v hrách); krátky výpadok jedného prsta stisk neruší
-      const pressed = pressedCountOf(d, cfg); // kalibrované prahy prstov (detail.fingers z WebSocketStatus)
-      let grip = pressed >= CLICK_FINGERS;
-      if (grip) gripLostAt = 0;
-      else if (wasGrip && pressed === CLICK_FINGERS - 1) {
-        if (!gripLostAt) gripLostAt = now;
-        if (now - gripLostAt < GRIP_DROPOUT_MS) grip = true;
-      } else gripLostAt = 0;
+      const grip = gripOf(d, cfg); // stisk ruky s hysterézou (fingerCalibration.handGrip): začne pri 5 prstoch, drží pri 4
 
       // Zrkadlenie osí rovnaké ako pri ovládaní v hrách (ľavá: Y obrátené, pravá: X obrátené)
       const nx = (left ? out.posNorm.x : -out.posNorm.x) * SCREEN_GAIN;

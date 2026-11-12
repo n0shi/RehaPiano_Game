@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
-import { pressedCountOf } from '../utils/fingerCalibration';
+import { gripOf } from '../utils/fingerCalibration';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { MenuCursor } from './MenuCursor';
@@ -21,7 +21,6 @@ const SHAPES: { key: ShapeKey; label: string; glyph: string }[] = [
   { key: 'rhombus', label: 'Kosoštvorec', glyph: '◇' },
 ];
 
-const PEN_FINGERS = 5;          // stisnuté prsty = pero dole
 const CURSOR_SMOOTH = 0.35;
 // Otočená ruka ("kosť") mala navyše One Euro filter (0,9 Hz, beta 0,006). Na zázname kruhu (pose_20261102) tremor takmer neznížil
 // (3,00 vs 3,01 px), ale pridal oneskorenie 13 px (bez neho 5 px) a nerovnomernú rýchlosť kurzora voči ruke (33 % vs 11 %): pri pomalšom
@@ -54,8 +53,6 @@ const PEN_SETTLE_MS = 180;      // po stisku prstov chvíľu počkaj (ruka sa pr
 // kurzor chvíľu stojí a potom sa nulový bod vynuluje v polohe otvorenej ruky – kurzor po zdvihnutí pera neodskočí.
 const RELEASE_FREEZE_MS = 350;
 const RELEASE_LOOKBACK_MS = 80; // koniec ťahu: body z posledných 80 ms pred uvoľnením sú už trhnutie od otvárania prstov, nekreslia sa
-// Výpadok jedného prsta (4 z 5) sa za uvoľnenie považuje až po tomto čase: pohyb zápästia mení napätie tenzometrov a ťah sa trhal na kúsky.
-const GRIP_DROPOUT_MS = 250;
 
 /** Obrys tvaru v súradniciach -1..1, hustý zatvorený polygón. */
 function outline(key: ShapeKey): Pt[] {
@@ -141,7 +138,6 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
   const anchorRef = useRef({ x: 400, y: 300 }); // bod, v ktorom bol kurzor pri poslednom vynulovaní náklonu
   const gripSinceRef = useRef(0);
   const prevGripRef = useRef(false);
-  const gripLostAtRef = useRef(0);
   const releaseUntilRef = useRef(0);          // kurzor stojí po uvoľnení prstov do tohto času (0 = nie)
   const trailTsRef = useRef<number[]>([]);    // časy bodov ťahu z rukavice (na orezanie konca ťahu)
   const armedRef = useRef(false);             // pero sa aktivuje až po uvoľnení prstov (aby klik na tvar nekreslil)
@@ -313,13 +309,8 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
         }
       }
 
-      const pressed = pressedCountOf(d, cfg); // kalibrované prahy prstov (detail.fingers z WebSocketStatus)
-      let grip = pressed >= PEN_FINGERS;
-      if (grip) gripLostAtRef.current = 0;
-      else if (prevGripRef.current && pressed === PEN_FINGERS - 1) {
-        if (!gripLostAtRef.current) gripLostAtRef.current = now;
-        if (now - gripLostAtRef.current < GRIP_DROPOUT_MS) grip = true; // krátky výpadok jedného prsta: pero ostáva dole
-      } else gripLostAtRef.current = 0;
+      // stisk ruky s hysterézou (fingerCalibration.handGrip): pero ide dole pri 5 prstoch a ostáva dole, kým držia aspoň 4
+      const grip = gripOf(d, cfg);
       const releasing = !grip && prevGripRef.current;
       prevGripRef.current = grip;
 

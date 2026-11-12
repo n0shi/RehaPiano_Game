@@ -75,7 +75,7 @@ function replay(file: string) {
     if (newStep && prevStep === 'turn') turnEnd = t;
     prevStep = r.step;
     applyAxisCorr(c as any, hand);
-    const fingers = detectFingers(m.adc, hand, {});
+    const fingers = detectFingers(m.adc, hand, {}, t);
     const seq = c.recenterSeq;
     const o = c.update({ imu: m.imu, adc: m.adc, ts: t, fingers } as any, dt);
     if (c.recenterSeq !== seq) recenters++;

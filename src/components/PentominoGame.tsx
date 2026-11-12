@@ -26,7 +26,7 @@ import {
 import { FingerCalibration } from '../types/game';
 import '../animations.css';
 import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
-import { pressedCountOf } from '../utils/fingerCalibration';
+import { gripOf } from '../utils/fingerCalibration';
 import { fuseSigned, DUAL_LEFT_GYRO_SIGN } from '../utils/dualHands';
 import { CursorGripInput } from '../utils/cursorInput';
 import { PieceManipulator, type ManipSnapshot, type CommitInfo } from '../utils/pieceManip';
@@ -59,10 +59,6 @@ const CALIB_SHOW_MS = 500;    // priebeh sa ukazuje až po tomto čase (krátky 
 const GRIP_FREEZE_MS = GRIP_RECENTER_MS + 60; // od začiatku stisku do vynulovania (s rezervou, aby vynulovanie padlo ešte do zmrazenia)
 const RELEASE_FREEZE_MS = 350;   // po uvoľnení: prsty sa otvárajú postupne (stisk končí už prvým uvoľneným prstom)
 const RELEASE_LOOKBACK_MS = 80;  // poloha pred uvoľnením: naklonenie začína ešte pred tým, ako prst klesne pod prah
-// Výpadok JEDNÉHO prsta (4 z 5) počas stisku sa za uvoľnenie považuje až po tomto čase. Pohyb zápästia mení napätie tenzometrov
-// a jeden prst krátko klesne pod prah: blok sa potom pustil, kurzor zamrzol a po 200 ms sa chytil znova – presun išiel "po bunkách".
-// Pustenie viacerých prstov naraz (≤ 3) platí hneď.
-const GRIP_DROPOUT_MS = 250;
 // Zámok osi kurzora (ako zámok osi bloku v pieceManip): pri zjavne vodorovnom/zvislom pohybe sa bočná zložka zahodí.
 // Prečo: náklon ruky má bočnú zložku (natočenie senzora a oblúk zápästia nesedia u každého presne – na záznamoch 10–35 %).
 // Bloky sa hýbu po bunkách, preto tu zámok ostáva (kreslenie ho nemá: kruh a šikmé čiary).
@@ -229,7 +225,6 @@ export function PentominoGame({
   const [calibProg, setCalibProg] = useState(0);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const prevGripRef = useRef(false);
-  const gripLostAtRef = useRef(0);
   const strokeRef = useRef<{ prev: { x: number; y: number } | null; seq: number; sx: number; sy: number; lock: 'x' | 'y' | null; stillMs: number }>(
     { prev: null, seq: -1, sx: 0, sy: 0, lock: null, stillMs: 0 });
   const freezeRef = useRef<{ pos: { x: number; y: number } | null; until: number; release: boolean }>({ pos: null, until: 0, release: false });
@@ -487,7 +482,6 @@ export function PentominoGame({
 
     // === DETEKCIA STISKU (z GameBoard.tsx) ===
     // Prsty jednej ruky (adc[1..5] = malíček->palec): kalibrované prahy z detail.fingers (WebSocketStatus), inak pôvodný pevný prah
-    const countPressed = (s: { adc?: number[]; fingers?: unknown }) => pressedCountOf(s, cfg);
 
     function onSample(ev: Event) {
       // Počas kalibrácie sa hra nehýbe a rozpracované gesto sa ruší
@@ -527,17 +521,8 @@ export function PentominoGame({
         lastSampleAtRef.current = performance.now();
 
         // Dve ruky: grip platí len keď stláčajú všetkých 5 prstov OBE ruky
-        const pressedMain = countPressed(sample);
-        const pressedCount = dualL ? Math.min(pressedMain, countPressed(dualL.sample)) : pressedMain;
-        let grip = pressedCount === 5;
-        {
-          const tG = performance.now();
-          if (grip) gripLostAtRef.current = 0;
-          else if (prevGripRef.current && pressedCount === 4) {
-            if (!gripLostAtRef.current) gripLostAtRef.current = tG;
-            if (tG - gripLostAtRef.current < GRIP_DROPOUT_MS) grip = true; // krátky výpadok jedného prsta: stisk trvá
-          } else gripLostAtRef.current = 0;
-        }
+        // stisk ruky s hysterézou (fingerCalibration.handGrip): začne pri 5 prstoch, drží pri 4, krátko aj pri 3
+        const grip = gripOf(sample, cfg) && (!dualL || gripOf(dualL.sample, cfg));
 
         // Ruka podľa zariadenia (stream posiela 'hand'), ako v menu a v kreslení; výber v menu len ako záloha
         const leftMain = !dualHands && (detail.hand === 'left' ? true : detail.hand === 'right' ? false : useLeftHand);
