@@ -5,8 +5,13 @@ import { useConfig } from '../config/ConfigContext';
 import { useModal } from '../context/ModalContext';
 import { computeFingerCal, saveFingerCal, handKeyOf, provisionalPressed, FINGER_COUNT, type FingerState } from '../utils/fingerCalibration';
 
-// Kalibrácia prstov pre konkrétneho človeka a sedenie (pozri utils/fingerCalibration.ts): pred stiskom sa zmeria pokoj a pohyb zápästia.
-type Phase = 'rest' | 'motion' | 'grip';
+// Kalibrácia prstov pre konkrétneho človeka a sedenie (pozri utils/fingerCalibration.ts): pred stiskom sa zmeria pokoj a pohyb zápästia,
+// po stisku ešte držanie stisku pri pohybe zápästia (aby sa stisk pri kreslení a presúvaní neprerušoval).
+type Phase = 'rest' | 'motion' | 'grip' | 'hold';
+const PHASES: Phase[] = ['rest', 'motion', 'grip', 'hold'];
+const PREP_MS = 3000;      // pred každým meraným krokom: čas na prečítanie pokynu (odpočet), ešte sa nič nemeria
+const HOLD_MS = 3000;      // držanie stisku pri krúžení zápästím
+const HOLD_MIN_SAMPLES = 150; // menej platných vzoriek (ruka sa pustila) = krok sa nepoužije, platia prahy bez neho
 const REST_SETTLE_MS = 800; // začiatok pokoja sa zahodí: prsty ešte dobiehajú zo stisku pri výbere ruky (na záznamoch odchýlka až 2 000 – 5 000 v prvých ~0,5 s)
 const REST_MS = 2000;      // uvoľnená ruka, bez pohybu (meria sa po REST_SETTLE_MS)
 const MOTION_MS = 3000;    // uvoľnené prsty, krúženie zápästím
@@ -48,13 +53,17 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
   const restBufRef = useRef<number[][]>([]);
   const motionBufRef = useRef<number[][]>([]);
   const gripBufRef = useRef<number[][]>([]);
+  const holdBufRef = useRef<number[][]>([]);
+  const pendingQuatRef = useRef<Quat | null>(null); // základná poloha zo stisku; kalibrácia sa dokončí až po kroku 'hold'
+  const [prepLeft, setPrepLeft] = useState(0);       // s do začiatku merania (0 = meria sa)
   const restStatsRef = useRef<{ rest: number[]; noise: number[] } | null>(null);
   const skipFingersRef = useRef(false);      // kalibrácia prstov preskočená (tlačidlo alebo klávesnica): platí uložená / pôvodný prah
   const handKeyRef = useRef<unknown>(undefined);
   const [savedNote, setSavedNote] = useState<string | null>(null);
   const goPhase = (p: Phase) => { phaseRef.current = p; setPhase(p); phaseStartRef.current = null; setPhaseProg(0); };
   const resetFingerCal = () => {
-    restBufRef.current = []; motionBufRef.current = []; gripBufRef.current = [];
+    restBufRef.current = []; motionBufRef.current = []; gripBufRef.current = []; holdBufRef.current = [];
+    pendingQuatRef.current = null; setPrepLeft(0);
     restStatsRef.current = null; skipFingersRef.current = false; setSavedNote(null);
     goPhase('rest');
   };
@@ -161,10 +170,16 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
       const ph = phaseRef.current;
       if (ph === 'rest' || ph === 'motion') {
         if (phaseStartRef.current === null) phaseStartRef.current = now;
+        imuFingerStatesRef.current = [false, false, false, false, false];
+        setFingerStates([false, false, false, false, false]);
+        // najprv odpočet na prečítanie pokynu, až potom meranie
+        const el = now - phaseStartRef.current - PREP_MS;
+        if (el < 0) { setPrepLeft(Math.ceil(-el / 1000)); setPhaseProg(0); return; }
+        setPrepLeft(0);
         const dur = ph === 'rest' ? REST_SETTLE_MS + REST_MS : MOTION_MS;
         if (ph === 'motion') motionBufRef.current.push(fingersRaw);
-        else if (now - phaseStartRef.current >= REST_SETTLE_MS) restBufRef.current.push(fingersRaw);
-        const prog = Math.min(1, (now - phaseStartRef.current) / dur);
+        else if (el >= REST_SETTLE_MS) restBufRef.current.push(fingersRaw);
+        const prog = Math.min(1, el / dur);
         setPhaseProg(prog);
         if (prog >= 1) {
           if (ph === 'rest') {
@@ -175,8 +190,30 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
             goPhase('grip');
           }
         }
-        imuFingerStatesRef.current = [false, false, false, false, false];
-        setFingerStates([false, false, false, false, false]);
+        return;
+      }
+
+      // Krok 4: držanie stisku pri pohybe zápästia. Meria sa, ako nízko každý prst klesne, kým ruka stále drží.
+      if (ph === 'hold') {
+        const rs0 = restStatsRef.current;
+        const pr = rs0 ? fingersRaw.map((v, i) => provisionalPressed(v, rs0.rest[i], rs0.noise[i])) : fingersRaw.map(() => false);
+        const shown = useLeftHand ? pr : pr.slice().reverse();
+        imuFingerStatesRef.current = shown;
+        setFingerStates(shown);
+        if (phaseStartRef.current === null) phaseStartRef.current = now;
+        const el = now - phaseStartRef.current - PREP_MS;
+        if (el < 0) { setPrepLeft(Math.ceil(-el / 1000)); setPhaseProg(0); return; }
+        setPrepLeft(0);
+        if (pr.filter(Boolean).length >= 3) holdBufRef.current.push(fingersRaw); // ruka ešte drží (pustená ruka sa nepočíta)
+        const prog = Math.min(1, el / HOLD_MS);
+        setPhaseProg(prog);
+        if (prog >= 1 && pendingQuatRef.current) {
+          const hold = holdBufRef.current.length >= HOLD_MIN_SAMPLES ? holdBufRef.current : [];
+          saveFingerCal(handKeyOf(handKeyRef.current), computeFingerCal(restBufRef.current, motionBufRef.current, gripBufRef.current, hold));
+          const q = pendingQuatRef.current;
+          pendingQuatRef.current = null;
+          calibrate(q);
+        }
         return;
       }
 
@@ -206,7 +243,7 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
 
     window.addEventListener('imu-sample', handleImuSample);
     return () => window.removeEventListener('imu-sample', handleImuSample);
-  }, [showCalibrationModal, useLeftHand, cfg, wsConnected, dual, calibratingHand]);
+  }, [showCalibrationModal, useLeftHand, cfg, wsConnected, dual, calibratingHand, calibrate]);
 
   // Skontrolovať či sú všetky prsty stlačené a podržať pre kalibráciu
   useEffect(() => {
@@ -229,12 +266,15 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
         if (elapsed >= CALIBRATION_THRESHOLD_MS) {
           // dokončiť kalibráciu a zastaviť RAF
           calibrationDoneRef.current = true;
-          // uložiť kalibráciu prstov (ak sa merala): pokoj, pohyb zápästia, sila stisku
+          const quat = lastQuat ?? { w: 1, x: 0, y: 0, z: 0 };
+          // Kalibrácia prstov sa merala: pokračuje krok 4 (držanie stisku v pohybe), uloží sa a dokončí až po ňom
           if (!skipFingersRef.current && restStatsRef.current && gripBufRef.current.length >= MIN_GRIP_SAMPLES) {
-            saveFingerCal(handKeyOf(handKeyRef.current), computeFingerCal(restBufRef.current, motionBufRef.current, gripBufRef.current));
+            pendingQuatRef.current = quat;
+            holdBufRef.current = [];
+            goPhase('hold');
+            return;
           }
-          if (lastQuat) calibrate(lastQuat);
-          else calibrate({ w: 1, x: 0, y: 0, z: 0 });
+          calibrate(quat);
           return;
         }
 
@@ -359,9 +399,9 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
           </h2>
           {/* Kroky kalibrácie: 1 pokoj, 2 pohyb zápästia, 3 stisk */}
           <div className="flex gap-2 mb-4 text-xs font-semibold">
-            {(['rest', 'motion', 'grip'] as Phase[]).map((p, i) => (
-              <span key={p} className={`px-3 py-1 rounded-full ${phase === p ? 'bg-blue-600 text-white' : (['rest', 'motion', 'grip'].indexOf(phase) > i ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-500')}`}>
-                {i + 1}. {p === 'rest' ? 'Pokoj' : p === 'motion' ? 'Pohyb zápästia' : 'Stisk'}
+            {PHASES.map((p, i) => (
+              <span key={p} className={`px-3 py-1 rounded-full ${phase === p ? 'bg-blue-600 text-white' : (PHASES.indexOf(phase) > i ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-500')}`}>
+                {i + 1}. {p === 'rest' ? 'Pokoj' : p === 'motion' ? 'Pohyb zápästia' : p === 'grip' ? 'Stisk' : 'Držanie'}
               </span>
             ))}
           </div>
@@ -369,18 +409,24 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
             {phase === 'rest' && <>Položte ruku do <strong>normálnej polohy</strong>, prsty <strong>úplne uvoľnené</strong> a nehýbte sa.</>}
             {phase === 'motion' && <>Prsty nechajte <strong>uvoľnené</strong> a pomaly <strong>krúžte zápästím</strong> do všetkých strán.</>}
             {phase === 'grip' && <>Teraz <strong>stisnite naplno všetky prsty naraz</strong> a podržte ich 1 sekundu v normálnej polohe.</>}
+            {phase === 'hold' && <><strong>Nepúšťajte stisk</strong> a pomaly <strong>krúžte zápästím</strong> do všetkých strán.</>}
           </p>
           {phase !== 'grip' && (
             <div className="w-full mb-6">
+              {/* odpočet: čas na prečítanie pokynu, meranie začne až po ňom */}
+              <p className={`mb-2 font-bold ${prepLeft > 0 ? 'text-4xl text-amber-500' : 'text-lg text-blue-600'}`}>
+                {prepLeft > 0 ? prepLeft : 'Meriam…'}
+              </p>
+              {prepLeft > 0 && <p className="text-sm text-slate-500 mb-2">Pripravte sa, meranie začne po odpočte</p>}
               <div className="h-3 bg-slate-200 rounded-full overflow-hidden">
                 <div className="h-full rounded-full bg-blue-500" style={{ width: `${phaseProg * 100}%` }} />
               </div>
-              <button
+              {phase !== 'hold' && <button
                 className="mt-3 text-sm text-slate-500 underline"
                 onClick={() => { skipFingersRef.current = true; goPhase('grip'); setSavedNote('Kalibrácia prstov preskočená – platí posledná uložená (alebo pôvodný prah).'); }}
               >
                 Preskočiť kalibráciu prstov
-              </button>
+              </button>}
             </div>
           )}
           {savedNote && <p className="text-xs text-slate-500 -mt-4 mb-4">{savedNote}</p>}
