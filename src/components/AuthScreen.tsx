@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { UserRound, UserPlus, Lock, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { parseOptionalNumber, validateProfile, type Account, type ProfileInput } from '../utils/accounts';
+import { parseOptionalNumber, validateProfile, PASS_MIN_LENGTH, type Account, type ProfileInput } from '../utils/accounts';
 
 // Vstup do aplikácie: výber existujúceho profilu alebo vytvorenie nového, potom voľba záznamu dát pre túto reláciu.
 
@@ -43,7 +43,7 @@ export function ProfileFields({ v, set, withPassword }: {
       </div>
       <div className="grid grid-cols-2 gap-4">
         <label className="block">
-          <span className="text-slate-700 font-medium">{withPassword === 'new' ? 'Heslo' : 'Nové heslo'} <span className="text-slate-400 font-normal">– nepovinné</span></span>
+          <span className="text-slate-700 font-medium">{withPassword === 'new' ? 'Heslo' : <>Nové heslo <span className="text-slate-400 font-normal">– ak ho chcete zmeniť</span></>}</span>
           <input className={input} type="password" value={v.password} onChange={(e) => set({ password: e.target.value })} autoComplete="new-password" />
         </label>
         <label className="block">
@@ -52,7 +52,7 @@ export function ProfileFields({ v, set, withPassword }: {
         </label>
       </div>
       <p className="text-sm text-slate-500">
-        Ak výšku alebo hmotnosť nepoznáte, nechajte pole prázdne. Bez hesla sa do profilu vstupuje jedným kliknutím.
+        Ak výšku alebo hmotnosť nepoznáte, nechajte pole prázdne. Heslo (aspoň {PASS_MIN_LENGTH} znakov) chráni váš profil pred ostatnými.
       </p>
     </div>
   );
@@ -64,9 +64,9 @@ export function RecordConsentBox({ checked, onChange }: { checked: boolean; onCh
     <label className={`flex items-start gap-4 p-5 rounded-2xl border-2 cursor-pointer text-left transition-colors ${checked ? 'border-green-400 bg-green-50' : 'border-slate-200 bg-slate-50'}`}>
       <input type="checkbox" className="mt-1 w-6 h-6 accent-green-600 flex-shrink-0" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span>
-        <span className="block text-lg font-semibold text-slate-800">Zaznamenávať moje dáta z rukavice počas kreslenia</span>
+        <span className="block text-lg font-semibold text-slate-800">Zaznamenávať moje dáta z rukavice počas kreslenia a hry Pentomino</span>
         <span className="block text-slate-600 mt-1">
-          Uloží sa pohyb ruky (snímač polohy a stisk prstov), dráha kurzora a výsledky kreslenia. Dáta slúžia na analýzu
+          Uloží sa pohyb ruky (snímač polohy a stisk prstov), dráha kurzora a výsledky kreslenia a úrovní. Dáta slúžia na analýzu
           a zlepšovanie ovládania. Ukladajú sa len v tomto počítači; v profile si ich môžete stiahnuť alebo vymazať
           a súhlas kedykoľvek zmeniť.
         </span>
@@ -92,13 +92,12 @@ export function AuthScreen() {
 
   const pick = (a: Account) => {
     setError(null); setPassword('');
-    if (a.pass) setPicked(a);
-    else void run(async () => { await login(a.id, ''); });
+    setPicked(a);
   };
   const submitPassword = (e: FormEvent) => {
     e.preventDefault();
     if (!picked) return;
-    void run(async () => { if (!(await login(picked.id, password))) throw new Error('Nesprávne heslo.'); setPicked(null); });
+    void run(async () => { await login(picked.id, password); setPicked(null); }).finally(() => setPassword(''));
   };
   const submitRegister = (e: FormEvent) => {
     e.preventDefault();
@@ -135,7 +134,7 @@ export function AuthScreen() {
           <div className="bg-blue-100 w-12 h-12 rounded-xl flex items-center justify-center"><Lock className="w-6 h-6 text-blue-600" /></div>
           <div className="text-left">
             <h2 className="text-2xl font-semibold text-slate-800">{picked.name}</h2>
-            <p className="text-slate-600">Zadajte heslo</p>
+            <p className="text-slate-600">{picked.pass ? 'Zadajte heslo' : `Tento účet ešte nemá heslo – zvoľte si ho (aspoň ${PASS_MIN_LENGTH} znakov)`}</p>
           </div>
         </div>
         <input className={input} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus autoComplete="current-password" />
@@ -153,7 +152,7 @@ export function AuthScreen() {
           <div className="bg-blue-100 w-12 h-12 rounded-xl flex items-center justify-center"><UserPlus className="w-6 h-6 text-blue-600" /></div>
           <div className="text-left">
             <h2 className="text-2xl font-semibold text-slate-800">Nový účet</h2>
-            <p className="text-slate-600">Stačí meno alebo prezývka, ostatné je nepovinné.</p>
+            <p className="text-slate-600">Meno alebo prezývka a heslo; výška a hmotnosť sú nepovinné.</p>
           </div>
         </div>
         <ProfileFields v={form} set={(patch) => setForm((f) => ({ ...f, ...patch }))} withPassword="new" />
@@ -184,7 +183,7 @@ export function AuthScreen() {
             >
               <span className="w-10 h-10 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center flex-shrink-0">{a.name.slice(0, 1).toUpperCase()}</span>
               <span className="text-lg font-semibold text-slate-800 truncate">{a.name}</span>
-              {a.pass && <Lock className="w-4 h-4 text-slate-400 ml-auto flex-shrink-0" />}
+              <Lock className="w-4 h-4 text-slate-400 ml-auto flex-shrink-0" />
             </button>
           ))}
         </div>

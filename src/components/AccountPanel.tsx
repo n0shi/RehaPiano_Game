@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useModal } from '../context/ModalContext';
 import { ProfileFields, RecordConsentBox, readProfileForm } from './AuthScreen';
 import { listRecordings, deleteRecording, deleteUserRecordings, type RecordingHeader } from '../utils/recordingStore';
-import { buildExport, downloadJson } from '../utils/sessionRecorder';
+import { buildExport, downloadJson, MAX_USER_SAMPLES } from '../utils/sessionRecorder';
 
 // Štítok prihláseného používateľa (v menu) a okno profilu: úprava údajov, súhlas so záznamom, uložené záznamy (stiahnuť / vymazať).
 
@@ -81,13 +81,16 @@ function ProfileModal({ onClose }: { onClose: () => void }) {
             </div>
           )}
         </div>
+        {totalSamples >= MAX_USER_SAMPLES && (
+          <p className="text-amber-700 bg-amber-50 rounded-xl px-4 py-2 mb-2">Úložisko záznamov je plné – nové sa neukladajú. Stiahnite si záznamy a vymažte ich.</p>
+        )}
         {!!recs?.length && (
           <ul className="divide-y divide-slate-200 border border-slate-200 rounded-2xl max-h-56 overflow-auto">
             {recs.map((r) => (
               <li key={r.id} className="flex items-center justify-between gap-3 px-4 py-2">
                 <span className="text-slate-700">
                   {fmtDate(r.startedAt)}
-                  <span className="text-slate-500 text-sm"> · kreslenie · {r.endedAt ? `${Math.round((r.endedAt - r.startedAt) / 1000)} s` : 'neukončené'}</span>
+                  <span className="text-slate-500 text-sm"> · {r.kind === 'pentomino' ? 'Pentomino' : 'kreslenie'} · {r.endedAt ? `${Math.round((r.endedAt - r.startedAt) / 1000)} s` : 'neukončené'}</span>
                 </span>
                 <span className="flex gap-1">
                   <button title="Stiahnuť" className="p-2 rounded-lg hover:bg-slate-100 text-slate-600" onClick={() => void exportOne(r)}><Download className="w-4 h-4" /></button>

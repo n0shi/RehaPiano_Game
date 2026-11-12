@@ -1,6 +1,7 @@
 // Používateľské účty. Aplikácia nemá server, takže účty žijú v prehliadači tohto počítača (localStorage).
-// Heslo je voliteľné a slúži na to, aby si ľudia na spoločnom počítači nepomýlili profil – nie je to ochrana pred niekým,
-// kto má prístup k počítaču. Ukladá sa len jeho odtlačok (PBKDF2-SHA256 so soľou; mimo zabezpečeného kontextu slabšia náhrada).
+// Každý účet má heslo, aby sa nikto neprihlásil do cudzieho profilu; po PASS_MAX_FAILS nesprávnych pokusoch sa účet na chvíľu zamkne.
+// Ukladá sa len odtlačok hesla (PBKDF2-SHA256 so soľou; mimo zabezpečeného kontextu slabšia náhrada). Nie je to ochrana pred niekým,
+// kto má prístup k súborom prehliadača na tomto počítači.
 
 export type Account = {
   id: string;
@@ -19,6 +20,10 @@ export type ProfileInput = { name: string; heightCm: number | null; weightKg: nu
 const KEY = 'rehapiano.accounts.v1';
 export const HEIGHT_RANGE = [50, 250] as const;
 export const WEIGHT_RANGE = [10, 300] as const;
+export const PASS_MIN_LENGTH = 6;
+export const PASS_MAX_FAILS = 5;       // toľko nesprávnych pokusov po sebe zamkne účet
+export const PASS_LOCK_MS = 60_000;    // na takto dlho
+const FAILS_KEY = 'rehapiano.loginFails.v1';
 
 export function loadAccounts(): Account[] {
   try {
@@ -66,7 +71,10 @@ async function makePass(password: string): Promise<Account['pass']> {
   return { algo, salt, hash: await hashPassword(password, salt, algo) };
 }
 
-/** Overí vstup; vracia text chyby (po slovensky) alebo null. `selfId` = účet, ktorý sa upravuje (jeho meno sa nepovažuje za obsadené). */
+/**
+ * Overí vstup; vracia text chyby (po slovensky) alebo null. `selfId` = účet, ktorý sa upravuje (jeho meno sa nepovažuje za obsadené).
+ * Heslo je povinné pri novom účte; pri úprave `password === undefined` znamená "bez zmeny".
+ */
 export function validateProfile(p: ProfileInput, selfId?: string): string | null {
   const name = p.name.trim();
   if (name.length < 2) return 'Zadajte meno alebo prezývku (aspoň 2 znaky).';
@@ -74,7 +82,7 @@ export function validateProfile(p: ProfileInput, selfId?: string): string | null
   if (loadAccounts().some((a) => a.id !== selfId && a.name.toLowerCase() === name.toLowerCase())) return 'Účet s týmto menom už existuje.';
   if (p.heightCm !== null && !(p.heightCm >= HEIGHT_RANGE[0] && p.heightCm <= HEIGHT_RANGE[1])) return `Výška musí byť ${HEIGHT_RANGE[0]}–${HEIGHT_RANGE[1]} cm (alebo nechajte prázdne).`;
   if (p.weightKg !== null && !(p.weightKg >= WEIGHT_RANGE[0] && p.weightKg <= WEIGHT_RANGE[1])) return `Hmotnosť musí byť ${WEIGHT_RANGE[0]}–${WEIGHT_RANGE[1]} kg (alebo nechajte prázdne).`;
-  if (p.password && p.password.length < 4) return 'Heslo musí mať aspoň 4 znaky (alebo ho nechajte prázdne).';
+  if (p.password === undefined ? !selfId : p.password.length < PASS_MIN_LENGTH) return `Heslo musí mať aspoň ${PASS_MIN_LENGTH} znakov.`;
   return null;
 }
 
@@ -95,12 +103,37 @@ export async function createAccount(p: ProfileInput): Promise<Account> {
 }
 
 export async function checkPassword(acc: Account, password: string): Promise<boolean> {
-  if (!acc.pass) return true;
+  if (!acc.pass) return false; // účet bez hesla (zo staršej verzie) si heslo musí najprv nastaviť
   if (acc.pass.algo === 'pbkdf2' && !globalThis.crypto?.subtle) return false; // heslo vzniklo v zabezpečenom kontexte, tu sa overiť nedá
   return (await hashPassword(password, acc.pass.salt, acc.pass.algo)) === acc.pass.hash;
 }
 
-/** Zmení údaje účtu. `password`: undefined = bez zmeny, '' = zrušiť heslo, inak nové heslo. */
+type Fails = Record<string, { n: number; until: number }>;
+function readFails(): Fails {
+  try { return JSON.parse(localStorage.getItem(FAILS_KEY) || '{}') || {}; } catch { return {}; }
+}
+/** Koľko ms je účet ešte zamknutý po nesprávnych pokusoch (0 = nie je). */
+export function lockRemainingMs(id: string, now = Date.now()): number {
+  return Math.max(0, (readFails()[id]?.until ?? 0) - now);
+}
+
+/** Prihlásenie heslom s počítaním nesprávnych pokusov. */
+export async function tryLogin(acc: Account, password: string, now = Date.now()): Promise<{ ok: boolean; lockedMs: number; attemptsLeft: number }> {
+  const fails = readFails();
+  const f = fails[acc.id] ?? { n: 0, until: 0 };
+  if (f.until > now) return { ok: false, lockedMs: f.until - now, attemptsLeft: 0 };
+  const ok = await checkPassword(acc, password);
+  if (ok) delete fails[acc.id];
+  else {
+    f.n++;
+    if (f.n >= PASS_MAX_FAILS) { f.n = 0; f.until = now + PASS_LOCK_MS; }
+    fails[acc.id] = f;
+  }
+  try { localStorage.setItem(FAILS_KEY, JSON.stringify(fails)); } catch { /* ignore */ }
+  return { ok, lockedMs: Math.max(0, f.until - now), attemptsLeft: ok ? PASS_MAX_FAILS : PASS_MAX_FAILS - f.n };
+}
+
+/** Zmení údaje účtu. `password`: undefined = bez zmeny, inak nové heslo. */
 export async function updateAccount(id: string, patch: Partial<ProfileInput> & { recordDefault?: boolean }): Promise<Account> {
   const list = loadAccounts();
   const cur = list.find((a) => a.id === id);

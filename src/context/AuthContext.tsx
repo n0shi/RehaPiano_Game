@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import {
-  loadAccounts, createAccount, checkPassword, updateAccount, removeAccount, type Account, type ProfileInput,
+  loadAccounts, createAccount, tryLogin, updateAccount, removeAccount, PASS_MIN_LENGTH, type Account, type ProfileInput,
 } from '../utils/accounts';
 import { deleteUserRecordings } from '../utils/recordingStore';
 
@@ -17,7 +17,8 @@ type AuthContextType = {
   /** súhlas so záznamom dát z rukavice počas kreslenia v tejto relácii */
   recordConsent: boolean;
   register: (p: ProfileInput) => Promise<void>;
-  login: (id: string, password: string) => Promise<boolean>;
+  /** Prihlási heslom; pri neúspechu vyhodí chybu s textom pre používateľa (nesprávne heslo, zamknutý účet). */
+  login: (id: string, password: string) => Promise<void>;
   startSession: (record: boolean) => Promise<void>;
   setRecordConsent: (record: boolean) => Promise<void>;
   updateProfile: (patch: Partial<ProfileInput>) => Promise<void>;
@@ -61,10 +62,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (id: string, password: string) => {
     const acc = loadAccounts().find((a) => a.id === id);
-    if (!acc || !(await checkPassword(acc, password))) return false;
+    if (!acc) throw new Error('Účet neexistuje.');
+    if (!acc.pass) {
+      // účet zo staršej verzie bez hesla: prvé prihlásenie mu heslo nastaví
+      if (password.length < PASS_MIN_LENGTH) throw new Error(`Tento účet ešte nemá heslo. Zvoľte si heslo (aspoň ${PASS_MIN_LENGTH} znakov).`);
+      await updateAccount(acc.id, { password });
+      refresh();
+    } else {
+      const r = await tryLogin(acc, password);
+      if (!r.ok) {
+        if (r.lockedMs > 0) throw new Error(`Príliš veľa nesprávnych pokusov. Skúste to znova o ${Math.ceil(r.lockedMs / 1000)} s.`);
+        throw new Error(`Nesprávne heslo. Zostáva pokusov: ${r.attemptsLeft}.`);
+      }
+    }
     setSession({ userId: acc.id, started: false, record: false });
-    return true;
-  }, [setSession]);
+  }, [setSession, refresh]);
 
   const startSession = useCallback(async (record: boolean) => {
     if (!session) return;
