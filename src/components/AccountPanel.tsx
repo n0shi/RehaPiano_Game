@@ -5,6 +5,7 @@ import { useModal } from '../context/ModalContext';
 import { ProfileFields, RecordConsentBox, readProfileForm } from './AuthScreen';
 import { listRecordings, deleteRecording, deleteUserRecordings, type RecordingHeader } from '../utils/recordingStore';
 import { buildExport, downloadJson, MAX_USER_SAMPLES } from '../utils/sessionRecorder';
+import { ProgressPanel } from './ProgressPanel';
 
 // Štítok prihláseného používateľa (v menu) a okno profilu: úprava údajov, súhlas so záznamom, uložené záznamy (stiahnuť / vymazať).
 
@@ -51,7 +52,7 @@ function ProfileModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-[9500] flex items-center justify-center bg-black/50 p-4" style={{ backdropFilter: 'blur(6px)' }}>
-      <div className="relative bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[92vh] overflow-auto p-8">
+      <div className="relative bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-auto p-8">
         <button aria-label="Zavrieť" onClick={onClose} className="absolute top-4 right-4 w-10 h-10 rounded-full flex items-center justify-center text-slate-600 hover:bg-slate-100">
           <X className="w-5 h-5" />
         </button>
@@ -64,6 +65,9 @@ function ProfileModal({ onClose }: { onClose: () => void }) {
             {note && <span className={note.ok ? 'text-green-700' : 'text-red-600'}>{note.text}</span>}
           </div>
         </form>
+
+        <h3 className="text-xl font-semibold text-slate-800 mt-8 mb-3">Môj pokrok</h3>
+        <ProgressPanel />
 
         <h3 className="text-xl font-semibold text-slate-800 mt-8 mb-3">Záznam dát</h3>
         <RecordConsentBox checked={recordConsent} onChange={(v) => void setRecordConsent(v)} />

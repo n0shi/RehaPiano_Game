@@ -5,6 +5,7 @@ import { gripOf } from '../utils/fingerCalibration';
 import { applyCursorModel, currentCursorModel } from '../utils/cursorModel';
 import { useAuth } from '../context/AuthContext';
 import { SessionRecorder } from '../utils/sessionRecorder';
+import { addResult } from '../utils/results';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { MenuCursor } from './MenuCursor';
@@ -149,6 +150,8 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
   const shapeRef = useRef<Pt[]>(outline('circle'));
   const scaleRef = useRef(REF_SCALE);
   scaleRef.current = LEVELS.find((l) => l.level === level)!.scale;
+  const shapeKeyRef = useRef(shapeKey); shapeKeyRef.current = shapeKey;
+  const levelRef = useRef(level); levelRef.current = level;
   const lastSampleRef = useRef(0);
   const propsRef = useRef({ leftHand, handMode });
   propsRef.current = { leftHand, handMode };
@@ -205,6 +208,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
     const res = evaluate(norm, shapeRef.current, REF_SCALE / scaleRef.current);
     setResult(res);
     recRef.current?.event({ type: 'result', points: tr.length, ...res });
+    addResult({ t: Date.now(), kind: 'drawing', shape: shapeKeyRef.current, level: levelRef.current, score: res.score, accuracy: res.accuracy, coverage: res.coverage }); // pokrok používateľa
   }, []);
 
   const penDownAt = useCallback((x: number, y: number) => {
