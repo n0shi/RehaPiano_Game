@@ -2,7 +2,9 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
 import { gripOf } from '../utils/fingerCalibration';
-import { applyCursorModel } from '../utils/cursorModel';
+import { applyCursorModel, currentCursorModel } from '../utils/cursorModel';
+import { useAuth } from '../context/AuthContext';
+import { DrawingRecorder } from '../utils/sessionRecorder';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { MenuCursor } from './MenuCursor';
@@ -107,6 +109,8 @@ type Props = { leftHand: boolean; onClose: () => void };
 export function ShapeTraceModal({ leftHand, onClose }: Props) {
   const { handMode, neutralQuat, neutralQuats } = useCalibration();
   const cfg = useConfig() as any;
+  const { user, recordConsent } = useAuth();
+  const recRef = useRef<DrawingRecorder | null>(null); // záznam dát z rukavice (len so súhlasom používateľa)
   const [phase, setPhase] = useState<'pick' | 'draw'>('pick');
   const [shapeKey, setShapeKey] = useState<ShapeKey>('circle');
   const [level, setLevel] = useState(3);
@@ -198,7 +202,9 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
     const { w, h } = sizeRef.current;
     const s = Math.min(w, h) * scaleRef.current;
     const norm = tr.map(([x, y]) => [(x - w / 2) / s, (y - h / 2) / s] as Pt);
-    setResult(evaluate(norm, shapeRef.current, REF_SCALE / scaleRef.current));
+    const res = evaluate(norm, shapeRef.current, REF_SCALE / scaleRef.current);
+    setResult(res);
+    recRef.current?.event({ type: 'result', points: tr.length, ...res });
   }, []);
 
   const penDownAt = useCallback((x: number, y: number) => {
@@ -228,6 +234,21 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
   }, [phase, render]);
+
+  // Záznam dát: beží počas kreslenia, ak s ním používateľ pri vstupe do relácie súhlasil
+  const userId = user?.id;
+  useEffect(() => {
+    if (phase !== 'draw' || !userId || !recordConsent) return;
+    const rec = new DrawingRecorder(userId, {
+      screen: 'shapeTrace', hand: handMode === 'dual' ? 'right' : leftHand ? 'left' : 'right', cursorModel: currentCursorModel(),
+    });
+    recRef.current = rec;
+    return () => { recRef.current = null; void rec.stop(); };
+  }, [phase, userId, recordConsent, leftHand, handMode]);
+  useEffect(() => {
+    if (phase !== 'draw') return;
+    recRef.current?.event({ type: 'shape', shape: shapeKey, level, scale: LEVELS.find((l) => l.level === level)!.scale, w: sizeRef.current.w, h: sizeRef.current.h });
+  }, [phase, shapeKey, level, userId, recordConsent]);
 
   // rukavica -> kurzor a pero
   useEffect(() => {
@@ -428,6 +449,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
           follow();
         }
       }
+      recRef.current?.add(now, d, { grip, pen: penRef.current, x: c.x, y: c.y, rolled: rolledRef.current });
       scheduleRender(); // vzorky chodia ~125/s, plátno sa prekreslí raz za snímku obrazovky
     };
 
@@ -596,6 +618,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
                 <span className={`px-2.5 py-1 rounded-full ${penDown ? 'bg-green-500 text-white' : 'bg-slate-200 text-slate-600'}`}>
                   {penDown ? 'Pero dole' : 'Pero hore'}
                 </span>
+                {recordConsent && <span className="px-2.5 py-1 rounded-full bg-red-100 text-red-700">● Záznam dát</span>}
               </div>
               {result && (
                 <div className="pointer-events-none absolute right-3 top-3 bg-white/85 rounded-xl shadow-lg p-3 text-slate-700 min-w-[180px]">
