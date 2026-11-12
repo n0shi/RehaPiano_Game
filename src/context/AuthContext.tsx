@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { setUserScope, removeUserScopedData } from '../utils/userScope';
 import {
   loadAccounts, createAccount, tryLogin, updateAccount, removeAccount, PASS_MIN_LENGTH, type Account, type ProfileInput,
 } from '../utils/accounts';
@@ -8,6 +9,8 @@ import { deleteUserRecordings } from '../utils/recordingStore';
 // obnovenie stránky používateľa neodhlási, zatvorenie karty áno.
 type Session = { userId: string; started: boolean; record: boolean };
 const SESSION_KEY = 'rehapiano.session.v1';
+export const IDLE_LOGOUT_MS = 10 * 60 * 1000; // bez aktivity (myš, klávesnica, pohyb alebo stisk rukavice) takto dlho = odhlásenie
+const GLOVE_ACTIVE_DPS = 25;                  // rýchlosť otáčania ruky, ktorá sa počíta ako aktivita (pokojne položená rukavica má pod ~10)
 
 type AuthContextType = {
   accounts: Account[];
@@ -53,6 +56,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(() => setAccounts(loadAccounts()), []);
 
   const user = useMemo(() => accounts.find((a) => a.id === session?.userId) ?? null, [accounts, session]);
+  // Kalibrácie a výsledky sa ukladajú pod prihláseným používateľom. Nastavuje sa už pri vykresľovaní, aby to platilo skôr,
+  // než si potomkovia (hry, kalibračné okno) prvýkrát prečítajú uložené údaje.
+  setUserScope(user?.id ?? null);
+
+  // Automatické odhlásenie po nečinnosti, aby ďalší človek nepokračoval v cudzom účte
+  const userId = user?.id;
+  useEffect(() => {
+    if (!userId) return;
+    let last = Date.now();
+    const touch = () => { last = Date.now(); };
+    const onSample = (ev: Event) => {
+      const d = (ev as CustomEvent).detail;
+      const i = d?.imu;
+      if (d?.fingers?.grip || (i && Math.max(Math.abs(Number(i.gyroX) || 0), Math.abs(Number(i.gyroY) || 0), Math.abs(Number(i.gyroZ) || 0)) > GLOVE_ACTIVE_DPS)) last = Date.now();
+    };
+    const events = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'];
+    for (const e of events) window.addEventListener(e, touch, { passive: true });
+    window.addEventListener('imu-sample', onSample as EventListener);
+    const timer = window.setInterval(() => { if (Date.now() - last > IDLE_LOGOUT_MS) setSession(null); }, 15000);
+    return () => {
+      for (const e of events) window.removeEventListener(e, touch);
+      window.removeEventListener('imu-sample', onSample as EventListener);
+      window.clearInterval(timer);
+    };
+  }, [userId, setSession]);
 
   const register = useCallback(async (p: ProfileInput) => {
     const acc = await createAccount(p);
@@ -104,6 +132,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!session) return;
     try { await deleteUserRecordings(session.userId); } catch (e) { console.warn('Mazanie záznamov zlyhalo', e); }
     removeAccount(session.userId);
+    removeUserScopedData(session.userId); // kalibrácie a výsledky tohto používateľa
     refresh();
     setSession(null);
   }, [session, refresh, setSession]);

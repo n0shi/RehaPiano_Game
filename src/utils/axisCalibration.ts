@@ -1,3 +1,4 @@
+import { scopedKey, onUserScopeChange } from './userScope';
 import { TILT_ROTATION_RIGHT_DEG, SHEAR_UP_RIGHT_HAND, SHEAR_RIGHT_RIGHT_HAND, profileFeatures, type AxisProfile } from './imuController';
 
 // Korekcia osí rukavice (natočenie senzora + oblúk zápästia) pre každú ruku zvlášť. Predvolené hodnoty sú z nameraných
@@ -23,7 +24,7 @@ type Stored = Partial<Record<HandKey, AxisCorr>>;
 
 function readAll(): Stored {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(scopedKey(STORAGE_KEY));
     return raw ? (JSON.parse(raw) as Stored) : {};
   } catch {
     return {};
@@ -40,7 +41,7 @@ export function loadAxisCorr(hand: HandKey): AxisCorr {
 
 export function saveAxisCorr(hand: HandKey, corr: AxisCorr) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...readAll(), [hand]: corr }));
+    localStorage.setItem(scopedKey(STORAGE_KEY), JSON.stringify({ ...readAll(), [hand]: corr }));
   } catch {
     // ignore
   }
@@ -50,7 +51,7 @@ export function clearAxisCorr(hand: HandKey) {
   try {
     const all = readAll();
     delete all[hand];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+    localStorage.setItem(scopedKey(STORAGE_KEY), JSON.stringify(all));
   } catch {
     // ignore
   }
@@ -230,10 +231,11 @@ const PROFILE_MERGE_DEG = 25; // nový profil nahradí uložený, ak sa uhly kr�
 const PROFILE_TARGET = 0.72;  // rad; najväčší nameraný pohyb sa zosilní tak, aby dosiahol ~90 % rozsahu (tiltClamp 0,8)
 
 let profileCache: Partial<Record<HandKey, AxisProfile[]>> = {};
+onUserScopeChange(() => { profileCache = {}; }); // profily osí sú uložené pre každého používateľa zvlášť
 
 function readProfiles(): Partial<Record<HandKey, AxisProfile[]>> {
   try {
-    const raw = localStorage.getItem(PROFILE_KEY);
+    const raw = localStorage.getItem(scopedKey(PROFILE_KEY));
     return raw ? (JSON.parse(raw) as Partial<Record<HandKey, AxisProfile[]>>) : {};
   } catch {
     return {};
@@ -249,7 +251,7 @@ export function loadProfiles(hand: HandKey): AxisProfile[] {
 function writeProfiles(hand: HandKey, list: AxisProfile[]) {
   profileCache = { ...profileCache, [hand]: list };
   try {
-    localStorage.setItem(PROFILE_KEY, JSON.stringify({ ...readProfiles(), [hand]: list }));
+    localStorage.setItem(scopedKey(PROFILE_KEY), JSON.stringify({ ...readProfiles(), [hand]: list }));
   } catch {
     // ignore
   }

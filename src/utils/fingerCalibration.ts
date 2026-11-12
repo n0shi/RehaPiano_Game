@@ -15,6 +15,7 @@
 // Stav prstov sa počíta raz na vzorku vo WebSocketStatus a posiela sa v detail.fingers udalosti 'imu-sample'.
 
 import { normalizeAdc } from './imuNormalize';
+import { scopedKey, onUserScopeChange } from './userScope';
 
 export const FINGER_COUNT = 5; // adc[1..5]
 export type FingerHandKey = 'left' | 'right' | 'default';
@@ -58,7 +59,7 @@ let cache: Partial<Record<FingerHandKey, FingerCal>> | null = null;
 function readAll(): Partial<Record<FingerHandKey, FingerCal>> {
   if (cache) return cache;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(scopedKey(STORAGE_KEY));
     cache = raw ? JSON.parse(raw) : {};
   } catch {
     cache = {};
@@ -81,7 +82,7 @@ export function saveFingerCal(hand: unknown, cal: FingerCal) {
   cache = { ...readAll(), [key]: cal };
   runtime[key] = undefined; gripRuntime[key] = undefined; // nový prah, nová hysteréza a drift od nuly
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));
+    localStorage.setItem(scopedKey(STORAGE_KEY), JSON.stringify(cache));
   } catch {
     // bez localStorage platí kalibrácia aspoň do obnovenia stránky
   }
@@ -91,7 +92,7 @@ export function clearFingerCal(hand?: unknown) {
   const all = { ...readAll() };
   if (hand === undefined) { cache = {}; for (const k of Object.keys(runtime)) runtime[k as FingerHandKey] = undefined; }
   else { delete all[handKeyOf(hand)]; cache = all; runtime[handKeyOf(hand)] = undefined; }
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cache)); } catch { /* ignore */ }
+  try { localStorage.setItem(scopedKey(STORAGE_KEY), JSON.stringify(cache)); } catch { /* ignore */ }
 }
 
 /** Prahové hodnoty pre jeden prst z kalibrácie (bez driftu). */
@@ -121,6 +122,13 @@ const runtime: Partial<Record<FingerHandKey, Runtime>> = {};
 
 type GripRuntime = { grip: boolean; lowSince: number };
 const gripRuntime: Partial<Record<FingerHandKey, GripRuntime>> = {};
+
+// Kalibrácia je uložená pre každého používateľa zvlášť: pri zmene používateľa sa zahodí načítaná kalibrácia aj rozpracovaný stav prstov
+onUserScopeChange(() => {
+  cache = null;
+  for (const k of Object.keys(runtime)) runtime[k as FingerHandKey] = undefined;
+  for (const k of Object.keys(gripRuntime)) gripRuntime[k as FingerHandKey] = undefined;
+});
 /** Stisk celej ruky z počtu stlačených prstov: začne pri všetkých 5, drží pri 4, pri 3 ešte GRIP_DROPOUT_MS, pri 2 a menej končí hneď. */
 function handGrip(key: FingerHandKey, count: number, now: number): boolean {
   const g = (gripRuntime[key] ??= { grip: false, lowSince: 0 });

@@ -3,7 +3,7 @@ import { Hand, X } from 'lucide-react';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { useModal } from '../context/ModalContext';
-import { computeFingerCal, saveFingerCal, handKeyOf, provisionalPressed, FINGER_COUNT, type FingerState } from '../utils/fingerCalibration';
+import { computeFingerCal, saveFingerCal, loadFingerCal, handKeyOf, provisionalPressed, FINGER_COUNT, type FingerState } from '../utils/fingerCalibration';
 
 // Kalibrácia prstov pre konkrétneho človeka a sedenie (pozri utils/fingerCalibration.ts): pred stiskom sa zmeria pokoj a pohyb zápästia,
 // po stisku ešte držanie stisku pri pohybe zápästia (aby sa stisk pri kreslení a presúvaní neprerušoval).
@@ -61,10 +61,17 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
   const handKeyRef = useRef<unknown>(undefined);
   const [savedNote, setSavedNote] = useState<string | null>(null);
   const goPhase = (p: Phase) => { phaseRef.current = p; setPhase(p); phaseStartRef.current = null; setPhaseProg(0); };
-  const resetFingerCal = () => {
+  const [usingSaved, setUsingSaved] = useState(false); // použila sa uložená kalibrácia prstov prihláseného používateľa
+  /** Začne kalibráciu. `full` = vždy merať prsty odznova; inak, ak má používateľ pre túto ruku uloženú kalibráciu, stačí stisk. */
+  const resetFingerCal = (full = true) => {
     restBufRef.current = []; motionBufRef.current = []; gripBufRef.current = []; holdBufRef.current = [];
     pendingQuatRef.current = null; setPrepLeft(0);
-    restStatsRef.current = null; skipFingersRef.current = false; setSavedNote(null);
+    restStatsRef.current = null; skipFingersRef.current = false; setSavedNote(null); setUsingSaved(false);
+    if (!full && loadFingerCal(useLeftHand ? 'left' : 'right')) {
+      skipFingersRef.current = true; setUsingSaved(true);
+      goPhase('grip');
+      return;
+    }
     goPhase('rest');
   };
 
@@ -309,7 +316,7 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
     setFingerStates([false, false, false, false, false]);
     setAllPressedFor(0);
     setLastQuat(null);
-    resetFingerCal();
+    resetFingerCal(false);
   }, [dual, calibratingHand]);
 
   // Resetovať stavy prstov keď sa modal zatvorí
@@ -338,7 +345,7 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
       setFingerStates([false, false, false, false, false]);
       setAllPressedFor(0);
       allPressedStartRef.current = null;
-      resetFingerCal();
+      resetFingerCal(false);
     }
   }, [showCalibrationModal]);
 
@@ -430,8 +437,15 @@ export function CalibrationModal({ useLeftHand: useLeftHandProp = false }: Calib
             </div>
           )}
           {savedNote && <p className="text-xs text-slate-500 -mt-4 mb-4">{savedNote}</p>}
+          {phase === 'grip' && usingSaved && (
+            <div className="-mt-4 mb-4 text-sm text-slate-600">
+              Používa sa vaša uložená kalibrácia prstov.{' '}
+              <button className="text-blue-600 underline" onClick={() => resetFingerCal(true)}>Kalibrovať prsty znova</button>
+              <div className="text-xs text-slate-500">Ak stisk nereaguje správne (rukavica sedí inak), kalibrujte znova.</div>
+            </div>
+          )}
           {phase === 'grip' && !skipFingersRef.current && (
-            <button className="-mt-4 mb-4 text-sm text-slate-500 underline" onClick={resetFingerCal}>
+            <button className="-mt-4 mb-4 text-sm text-slate-500 underline" onClick={() => resetFingerCal(true)}>
               Nedá sa stisnúť? Začať kalibráciu prstov odznova
             </button>
           )}
