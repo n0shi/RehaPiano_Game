@@ -27,7 +27,9 @@ import { FingerCalibration } from '../types/game';
 import '../animations.css';
 import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
 import { gripOf } from '../utils/fingerCalibration';
-import { applyCursorModel } from '../utils/cursorModel';
+import { applyCursorModel, currentCursorModel } from '../utils/cursorModel';
+import { useAuth } from '../context/AuthContext';
+import { SessionRecorder } from '../utils/sessionRecorder';
 import { fuseSigned, DUAL_LEFT_GYRO_SIGN } from '../utils/dualHands';
 import { CursorGripInput } from '../utils/cursorInput';
 import { PieceManipulator, type ManipSnapshot, type CommitInfo } from '../utils/pieceManip';
@@ -242,6 +244,22 @@ export function PentominoGame({
 
   const levels: PentominoLevel[] = (levelsData as PentominoLevel[]).slice(0, maxLevels);
   const currentLevel = levels[currentLevelIndex];
+
+  // Záznam dát z rukavice počas hry (len so súhlasom prihláseného používateľa; pozri utils/sessionRecorder.ts)
+  const { user: authUser, recordConsent } = useAuth();
+  const recRef = useRef<SessionRecorder | null>(null);
+  const recUserId = authUser?.id;
+  useEffect(() => {
+    if (!recUserId || !recordConsent) return;
+    const rec = new SessionRecorder(recUserId, 'pentomino', {
+      hand: dualHands ? 'both' : useLeftHand ? 'left' : 'right', cursorModel: currentCursorModel(),
+    });
+    recRef.current = rec;
+    return () => { recRef.current = null; void rec.stop(); };
+  }, [recUserId, recordConsent, dualHands, useLeftHand]);
+  useEffect(() => {
+    recRef.current?.event({ type: 'level', index: currentLevelIndex });
+  }, [currentLevelIndex, recUserId, recordConsent]);
 
   // Fixná veľkosť gridu (ako GameBoard)
   const GRID_WIDTH = 20;
@@ -698,6 +716,8 @@ export function PentominoGame({
             imuCtrlRef.current?.consumeGyroX(); // flip je vybavený: ďalší až po uvoľnení gyra
           }
         }
+
+        recRef.current?.add(now, detail, { grip, active: input.moving, x: position.x, y: position.y, rolled: rolledNow });
 
         if (showImuDebugRef.current) {
           setImuDebug({

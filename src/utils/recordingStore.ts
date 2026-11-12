@@ -1,10 +1,10 @@
-// Úložisko záznamov z rukavice (IndexedDB v prehliadači tohto počítača). Záznam = hlavička + kusy vzoriek po ~1000 riadkov,
-// aby sa pri páde stránky nestratil celý záznam a aby sa do pamäte nenačítavalo viac, než treba.
+// Úložisko záznamov z rukavice (IndexedDB v prehliadači tohto počítača). Záznam = hlavička + bloky vzoriek (Float32Array, riadky po `cols`
+// číslach), aby sa pri páde stránky nestratil celý záznam a aby uloženie zaberalo čo najmenej.
 
 export type RecordingHeader = {
   id?: number;
   userId: string;
-  kind: 'drawing';
+  kind: 'drawing' | 'pentomino';
   startedAt: number;
   endedAt: number | null;
   sampleCount: number;
@@ -46,9 +46,14 @@ export async function createRecording(h: RecordingHeader): Promise<number> {
   return (await wrap(d.transaction('recordings', 'readwrite').objectStore('recordings').add(h))) as number;
 }
 
-export async function putChunk(recId: number, idx: number, rows: number[][]): Promise<void> {
+export async function putChunk(recId: number, idx: number, cols: number, data: Float32Array): Promise<void> {
   const d = await db();
-  await wrap(d.transaction('chunks', 'readwrite').objectStore('chunks').put({ recId, idx, rows }));
+  await wrap(d.transaction('chunks', 'readwrite').objectStore('chunks').put({ recId, idx, cols, data }));
+}
+
+/** Počet uložených vzoriek používateľa (na strop úložiska). Rozpracovaný záznam má 0, kým sa neukončí. */
+export async function userSampleCount(userId: string): Promise<number> {
+  return (await listRecordings(userId)).reduce((a, r) => a + (r.sampleCount || 0), 0);
 }
 
 export async function finishRecording(recId: number, patch: Partial<RecordingHeader>): Promise<void> {
@@ -66,8 +71,15 @@ export async function listRecordings(userId: string): Promise<RecordingHeader[]>
 
 export async function readSamples(recId: number): Promise<number[][]> {
   const d = await db();
-  const chunks = (await wrap(d.transaction('chunks').objectStore('chunks').index('recId').getAll(recId))) as { idx: number; rows: number[][] }[];
-  return chunks.sort((a, b) => a.idx - b.idx).flatMap((c) => c.rows);
+  const chunks = (await wrap(d.transaction('chunks').objectStore('chunks').index('recId').getAll(recId))) as { idx: number; cols: number; data: Float32Array }[];
+  const out: number[][] = [];
+  for (const c of chunks.sort((a, b) => a.idx - b.idx)) {
+    for (let o = 0; o + c.cols <= c.data.length; o += c.cols) {
+      // 32-bitové čísla zaokrúhlené na 5 platných číslic: menší súbor pri exporte, presnosť senzora to neprekračuje
+      out.push(Array.from(c.data.subarray(o, o + c.cols), (v) => Number(v.toPrecision(5))));
+    }
+  }
+  return out;
 }
 
 export async function deleteRecording(recId: number): Promise<void> {

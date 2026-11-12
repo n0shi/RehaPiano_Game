@@ -4,7 +4,7 @@ import { applyAxisCorr } from '../utils/axisCalibration';
 import { gripOf } from '../utils/fingerCalibration';
 import { applyCursorModel, currentCursorModel } from '../utils/cursorModel';
 import { useAuth } from '../context/AuthContext';
-import { DrawingRecorder } from '../utils/sessionRecorder';
+import { SessionRecorder } from '../utils/sessionRecorder';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { MenuCursor } from './MenuCursor';
@@ -110,7 +110,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
   const { handMode, neutralQuat, neutralQuats } = useCalibration();
   const cfg = useConfig() as any;
   const { user, recordConsent } = useAuth();
-  const recRef = useRef<DrawingRecorder | null>(null); // záznam dát z rukavice (len so súhlasom používateľa)
+  const recRef = useRef<SessionRecorder | null>(null); // záznam dát z rukavice (len so súhlasom používateľa)
   const [phase, setPhase] = useState<'pick' | 'draw'>('pick');
   const [shapeKey, setShapeKey] = useState<ShapeKey>('circle');
   const [level, setLevel] = useState(3);
@@ -239,8 +239,8 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
   const userId = user?.id;
   useEffect(() => {
     if (phase !== 'draw' || !userId || !recordConsent) return;
-    const rec = new DrawingRecorder(userId, {
-      screen: 'shapeTrace', hand: handMode === 'dual' ? 'right' : leftHand ? 'left' : 'right', cursorModel: currentCursorModel(),
+    const rec = new SessionRecorder(userId, 'drawing', {
+      hand: handMode === 'dual' ? 'right' : leftHand ? 'left' : 'right', cursorModel: currentCursorModel(),
     });
     recRef.current = rec;
     return () => { recRef.current = null; void rec.stop(); };
@@ -449,7 +449,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
           follow();
         }
       }
-      recRef.current?.add(now, d, { grip, pen: penRef.current, x: c.x, y: c.y, rolled: rolledRef.current });
+      recRef.current?.add(now, d, { grip, active: penRef.current, x: c.x, y: c.y, rolled: rolledRef.current });
       scheduleRender(); // vzorky chodia ~125/s, plátno sa prekreslí raz za snímku obrazovky
     };
 
