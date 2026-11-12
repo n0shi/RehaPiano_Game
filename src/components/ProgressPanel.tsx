@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { loadResults, summarize, type DayPoint } from '../utils/results';
+import { loadResults, summarize, type DayPoint, type GameResult } from '../utils/results';
 
 // Pokrok používateľa v profile: najlepšie výsledky a malé grafy priemeru po dňoch (kreslenie: skóre, Pentomino: čas úrovne).
 
@@ -50,13 +50,41 @@ function Trend({ change, format, betterWhenLower, count }: { change: number | nu
   );
 }
 
+/** Vymyslené výsledky za posledných 14 dní – len na ukážku, ako pokrok vyzerá. Nikam sa neukladajú. */
+function demoResults(): GameResult[] {
+  const day = 86400000, start = Date.now() - 13 * day, out: GameResult[] = [];
+  const score = [34, 41, 38, 47, 52, 49, 58, 61, 57, 66, 70, 68, 75, 79];
+  const time = [245, 230, 238, 205, 190, 198, 172, 160, 166, 148, 139, 142, 128, 121];
+  for (let d = 0; d < 14; d++) {
+    if (d === 5 || d === 9) continue; // dni bez tréningu
+    ['circle', 'square', 'triangle', 'rhombus'].forEach((shape, k) => {
+      out.push({ t: start + d * day + k * 90000, kind: 'drawing', shape, level: 1, score: Math.min(100, score[d] + [4, 0, -5, -8][k]), accuracy: 0.7, coverage: 0.9 });
+    });
+    for (let l = 1; l <= 3; l++) out.push({ t: start + d * day + 600000 + l * 200000, kind: 'pentomino', level: l, seconds: Math.round(time[d] * (0.6 + 0.3 * l)) });
+  }
+  return out;
+}
+
 export function ProgressPanel() {
-  const p = useMemo(() => summarize(loadResults()), []);
+  const [demo, setDemo] = useState(false);
+  const p = useMemo(() => summarize(demo ? demoResults() : loadResults()), [demo]);
   const card = 'rounded-2xl border border-slate-200 p-4';
+  const toggle = (
+    <button className="text-sm text-blue-600 underline" onClick={() => setDemo((v) => !v)}>
+      {demo ? 'Späť na moje výsledky' : 'Zobraziť ukážku s vymyslenými dátami'}
+    </button>
+  );
   if (!p.drawing.count && !p.pentomino.count) {
-    return <p className="text-slate-600">Zatiaľ žiadne výsledky. Po prvom kreslení alebo dokončenej úrovni Pentomina sa tu ukáže váš pokrok.</p>;
+    return (
+      <div>
+        <p className="text-slate-600">Zatiaľ žiadne výsledky. Po prvom kreslení alebo dokončenej úrovni Pentomina sa tu ukáže váš pokrok.</p>
+        {toggle}
+      </div>
+    );
   }
   return (
+    <div>
+    {demo && <p className="mb-3 px-4 py-2 rounded-xl bg-amber-50 text-amber-800 text-sm font-medium">Ukážka: vymyslené dáta, nie vaše výsledky. Nič sa neukladá.</p>}
     <div className="grid md:grid-cols-2 gap-4">
       {p.drawing.count > 0 && (
         <div className={card}>
@@ -94,6 +122,8 @@ export function ProgressPanel() {
           </table>
         </div>
       )}
+    </div>
+    <div className="mt-2">{toggle}</div>
     </div>
   );
 }
