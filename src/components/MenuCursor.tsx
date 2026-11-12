@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
 import { gripOf } from '../utils/fingerCalibration';
+import { applyCursorModel } from '../utils/cursorModel';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 
@@ -61,7 +62,7 @@ export function MenuCursor({ screen, leftHand }: Props) {
       // dosahu medzi smermi 2,7x -> 3,0x (zosilnenie sa učí z malých výchyliek a veľký pohyb potom preletí).
       c.autoReach = false;
       c.autoAxes = false;
-      c.axes3d = true; // zvyčajná poloha: 3D osi (imuController.NORMAL_PROFILE)
+      applyCursorModel(c); // model pohyb -> kurzor: prepína sa v utils/cursorModel.ts
       // otočená poloha (kosť na 90°): zvislé pohyby boli slabšie než vodorovné a hore kurzor ušiel doľava. Laditeľné v konzole:
       // localStorage.setItem('rehapiano.menuRolled', '{"up":1.4,"down":1.7,"shear":-0.2}') a obnoviť stránku
       c.rolledTune = { up: 1.4, down: 1.7, shear: -0.2 };

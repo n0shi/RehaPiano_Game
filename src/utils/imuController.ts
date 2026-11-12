@@ -100,6 +100,11 @@ export const NORMAL_PROFILE: AxisProfile = {
   gains: { right: 1, left: 1, up: 1, down: 1 },
 };
 /**
+ * Os predlaktia v súradniciach senzora (SingleIMUController.gravityAxes): os, okolo ktorej sa rukavica otočí medzi zvyčajnou a otočenou
+ * polohou. Na štyroch záznamoch pose_* (otočenie 60–88°) vyšla vždy blízko osi Z senzora; toto je ich priemer.
+ */
+export const FOREARM_AXIS: Vec3 = [-0.024, 0.173, 0.985];
+/**
  * Otočená poloha sa pozná podľa absolútneho krútenia rukavice (uhol vektora "hore" v rovine X/Y senzora, nezávislý od yaw a kalibrácie):
  * základná poloha má ~+52° (namerané 50–56°), otočená ~-6…-25°. Hranica medzi nimi je ROLLED_ROLL_MAX_DEG.
  */
@@ -385,6 +390,10 @@ export class SingleIMUController {
   // true = zvyčajná poloha pravej ruky používa 3D osi NORMAL_PROFILE namiesto otočenia o 62° + shear + gains (tie sa vtedy nepoužijú).
   // Ľavá ruka ostáva na pôvodnom modeli (pre ňu nie sú záznamy). Otočená poloha a ručná "Kalibrácia osí" sa nemenia.
   public axes3d = false;
+  // true = osi z gravitácie (pravá ruka): "vpravo" = otočenie okolo zvislice (smer "hore" v senzore pri vynulovaní), "dole" = otočenie okolo
+  // vodorovnej osi kolmej na predlaktie (FOREARM_AXIS). Rovnaký výpočet pre zvyčajnú aj otočenú polohu, bez vstavaných osí, shear a gains.
+  public gravityAxes = false;
+  private gravProfile: AxisProfile | null = null; // osi z gravitácie pre aktuálny nulový bod
   // Otočenie vektora náklonu (°) v rovine X/Y: senzor v rukavici je voči ruke natočený (~46°), takže pohyb doprava
   // išiel šikmo dole a hore/dole šikmo do strán. Namerané z nahrávky (zhoda všetkých 4 smerov). 0 = bez korekcie.
   public tiltRotationDeg = 0;
@@ -565,6 +574,11 @@ export class SingleIMUController {
 
   private setRest(q: Quat) {
     this.restQuat = q;
+    {
+      const up = upInSensor(q);
+      const eV = vUnit([up[1] * FOREARM_AXIS[2] - up[2] * FOREARM_AXIS[1], up[2] * FOREARM_AXIS[0] - up[0] * FOREARM_AXIS[2], up[0] * FOREARM_AXIS[1] - up[1] * FOREARM_AXIS[0]]);
+      this.gravProfile = { roll: 0, eH: vScale(up, -1), eV, gains: { right: 1, left: 1, up: 1, down: 1 } };
+    }
     this.restRoll = gravityAngles(q).rho;
     const pa = pointerAngles(q);
     this.restAz = pa.az;
@@ -674,9 +688,10 @@ export class SingleIMUController {
         q = quatMultiply(this.qNeutralInv, q);
       }
       this.lastRv = rotVec(q);
-      const builtin = !this.activeProfile && this.isRolled;
-      const normal3d = !this.activeProfile && !this.isRolled && this.axes3d && this.screenFlipX; // screenFlipX = pravá ruka
-      const prof = this.activeProfile ?? (builtin ? ROLLED_PROFILE : normal3d ? NORMAL_PROFILE : null);
+      const gravity = !this.activeProfile && this.gravityAxes && this.screenFlipX && !!this.gravProfile; // screenFlipX = pravá ruka
+      const builtin = !this.activeProfile && this.isRolled && !gravity;
+      const normal3d = !this.activeProfile && !this.isRolled && this.axes3d && this.screenFlipX && !gravity;
+      const prof = this.activeProfile ?? (gravity ? this.gravProfile : builtin ? ROLLED_PROFILE : normal3d ? NORMAL_PROFILE : null);
       if (this.pointerTilt) {
         legacyCorr = false;
         const pa = pointerAngles(imu.quat);
@@ -698,7 +713,7 @@ export class SingleIMUController {
           ny = vy * k * precision;
         }
       } else if (prof) {
-        if (builtin || normal3d) legacyCorr = false; // vstavané osi sú už zarovnané s obrazovkou: bez natočenia, shear a gains
+        if (builtin || normal3d || gravity) legacyCorr = false; // vstavané osi sú už zarovnané s obrazovkou: bez natočenia, shear a gains
         // osi "vpravo" a "dole" naučené z pohybov v tejto polohe rukavice (promietnutie rotačného vektora)
         let rx: number, ry: number;
         if (prof.mx && prof.my) {

@@ -4,7 +4,7 @@
 //   tools/replay.sh tools/recordings/pose_20261102_110016            (menu preset)
 //   tools/replay.sh --preset game tools/recordings/pose_*            (Pentomino/drawing preset, several recordings)
 //   tools/replay.sh --no-rest-recenter <rec>                         (zero only at the first sample; tests automatic pose detection)
-//   tools/replay.sh --no-axes3d <rec>                                (old normal-pose model: 62 degree rotation + shear)
+//   tools/replay.sh --model legacy|axes3d|gravity <rec>              (cursor model, default = CURSOR_MODEL in src/utils/cursorModel.ts)
 //
 // Columns per direction step (A_right, B_up, ...), cursor in screen units (1 = half of the screen, x right, y down):
 //   reach  - how far the cursor went in the asked direction (98th percentile)
@@ -15,6 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import SingleIMUController from '../src/utils/imuController';
 import { applyAxisCorr } from '../src/utils/axisCalibration';
+import { applyCursorModel, CURSOR_MODEL, type CursorModel } from '../src/utils/cursorModel';
 import { computeFingerCal, saveFingerCal, detectFingers, clearFingerCal } from '../src/utils/fingerCalibration';
 
 type Row = { t: number; step: string; msg: any };
@@ -24,12 +25,12 @@ const SCREEN = { w: 1920, h: 1080 };
 const args = process.argv.slice(2);
 let preset: 'menu' | 'game' = 'menu';
 let restRecenter = true;
-let axes3d = true;
+let model: CursorModel = CURSOR_MODEL;
 const recs: string[] = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--preset') preset = args[++i] as any;
   else if (args[i] === '--no-rest-recenter') restRecenter = false;
-  else if (args[i] === '--no-axes3d') axes3d = false;
+  else if (args[i] === '--model') model = args[++i] as CursorModel;
   else recs.push(args[i]);
 }
 if (!recs.length) { console.error('usage: tools/replay.sh [--preset menu|game] [--no-rest-recenter] <recording dir or samples.jsonl> ...'); process.exit(1); }
@@ -37,7 +38,7 @@ if (!recs.length) { console.error('usage: tools/replay.sh [--preset menu|game] [
 function makeController(): SingleIMUController {
   const c = new SingleIMUController();
   c.gyroDivisor = 1; c.linearTilt = true; c.angleTilt = true; c.precisionScale = 1; c.tiltMax = 4; c.posLimit = 4;
-  c.axes3d = axes3d;
+  applyCursorModel(c, model);
   if (preset === 'menu') { // as in MenuCursor.tsx
     c.oneEuro = true; c.tiltDeadzone = 0.035; c.autoReach = false; c.autoAxes = false;
     c.rolledTune = { up: 1.4, down: 1.7, shear: -0.2 };
@@ -94,7 +95,7 @@ function replay(file: string) {
     if (q && q.quatW !== undefined) s.rho.push((Math.atan2(2 * (q.quatY * q.quatZ + q.quatW * q.quatX), 2 * (q.quatX * q.quatZ - q.quatW * q.quatY)) * 180) / Math.PI);
   }
 
-  console.log(`\n=== ${path.basename(path.dirname(p))}  hand=${hand}  preset=${preset}  samples=${n}  fingerCal=${haveCal ? 'from recording' : 'none (fixed threshold)'}`);
+  console.log(`\n=== ${path.basename(path.dirname(p))}  hand=${hand}  preset=${preset}  model=${model}  samples=${n}  fingerCal=${haveCal ? 'from recording' : 'none (fixed threshold)'}`);
   console.log(`controller grip active: ${((100 * ctrlGrip) / n).toFixed(0)} % of samples | automatic recenters: ${recenters} | axis updates learned: ${c.autoLearnedSeq}` +
     (turnEnd ? ` | rolled pose recognised ${rolledAt ? ((rolledAt - turnEnd) / 1000).toFixed(1) + ' s after the turn' : 'NEVER'}` : ''));
   console.log('step        reach   side  rolled%  grip%  twist min..max');

@@ -27,6 +27,7 @@ import { FingerCalibration } from '../types/game';
 import '../animations.css';
 import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
 import { gripOf } from '../utils/fingerCalibration';
+import { applyCursorModel } from '../utils/cursorModel';
 import { fuseSigned, DUAL_LEFT_GYRO_SIGN } from '../utils/dualHands';
 import { CursorGripInput } from '../utils/cursorInput';
 import { PieceManipulator, type ManipSnapshot, type CommitInfo } from '../utils/pieceManip';
@@ -394,7 +395,7 @@ export function PentominoGame({
       imuCtrlRef.current.autoReach = false;
       imuCtrlRef.current.autoReachTarget = 0.6;
       imuCtrlRef.current.autoAxes = false;
-      imuCtrlRef.current.axes3d = true; // zvyčajná poloha: 3D osi (imuController.NORMAL_PROFILE)
+      applyCursorModel(imuCtrlRef.current); // model pohyb -> kurzor: prepína sa v utils/cursorModel.ts
       imuCtrlRef.current.rolledTune = { up: 1.4, down: 1.7, shear: -0.2, right: 1, left: 1 }; // len otočená poloha; ladenie: localStorage 'rehapiano.drawRolled' (rovnaké ako v kreslení)
       try {
         const raw = localStorage.getItem('rehapiano.drawRolled');

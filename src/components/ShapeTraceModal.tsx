@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
 import { gripOf } from '../utils/fingerCalibration';
+import { applyCursorModel } from '../utils/cursorModel';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { MenuCursor } from './MenuCursor';
@@ -244,7 +245,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
       c.cellHysteresis = 0.3;
       // žiadna mŕtva zóna v strede ani saturácia na okraji: kurzor ide presne za rukou
       c.tiltDeadzone = 0;
-      c.axes3d = true; // zvyčajná poloha: 3D osi (imuController.NORMAL_PROFILE)
+      applyCursorModel(c); // model pohyb -> kurzor: prepína sa v utils/cursorModel.ts
       c.autoReach = false; // pri kreslení pevné lineárne zosilnenie: meniace sa zosilnenie podľa smeru pôsobilo ako stena
       c.autoAxes = false; // pri kreslení pevné vstavané osi otočenej polohy: priebežné učenie osí (a osi naučené v menu) kurzorom počas kruhu cukalo
       // otočená poloha (kosť na 90°) – rovnaké doladenie zvislých pohybov ako v menu; zvyčajnú polohu sa netýka. Laditeľné v konzole:
