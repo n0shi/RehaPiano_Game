@@ -7,6 +7,8 @@ export type Sample = {
   imu: RawIMU;
   adc: number[];
   ts?: number;
+  /** Stav prstov z kalibrácie človeka (detail.fingers udalosti 'imu-sample'). Ak je, stisk sa berie z neho a nie zo surového ADC. */
+  fingers?: { count: number };
 };
 
 type Quat = { w: number; x: number; y: number; z: number };
@@ -89,9 +91,18 @@ export const ROLLED_PROFILE: AxisProfile = {
  */
 export const ROLLED_ROLL_MAX_DEG = 20;
 export const ROLLED_ROLL_MIN_DEG = -120;
-const isRolledRoll = (rollRad: number) => {
+/**
+ * Hysteréza medzi polohami: počas pohybu sa krútenie mení o desiatky stupňov a pásma sa prekrývajú (záznamy pose_*: zvyčajná poloha v pokoji
+ * 41…64°, pri pohybe dole/krúžení klesne až na 7…19°; otočená v pokoji -28…-6°, pri pohybe hore/krúžení stúpne až na 13…28°). S jedinou hranicou
+ * 20° sa preto zvyčajná poloha pri vynulovaní v náklone dole zamenila za otočenú. Do otočenej sa prejde až pod ROLLED_ENTER_DEG, späť až nad ROLLED_EXIT_DEG.
+ */
+export const ROLLED_ENTER_DEG = 5;
+export const ROLLED_EXIT_DEG = 35;
+/** Je rukavica pri tomto krútení otočená? `current` = doterajší stav (null = ešte neznámy: platí jediná hranica ROLLED_ROLL_MAX_DEG). */
+const nextRolled = (rollRad: number, current: boolean | null) => {
   const d = (rollRad * 180) / Math.PI;
-  return d < ROLLED_ROLL_MAX_DEG && d > ROLLED_ROLL_MIN_DEG;
+  if (d <= ROLLED_ROLL_MIN_DEG) return false;
+  return d < (current === null ? ROLLED_ROLL_MAX_DEG : current ? ROLLED_EXIT_DEG : ROLLED_ENTER_DEG);
 };
 
 /**
@@ -324,6 +335,7 @@ export class SingleIMUController {
   /** Doladenie otočenej polohy (len pre tento kontrolér): zosilnenie hore/dole a dodatočný bočný skos (x += k·y, y dole). Predvolene nič nemení. */
   public rolledTune: { up: number; down: number; shear: number; right?: number; left?: number; m?: [number, number, number, number] } = { up: 1, down: 1, shear: 0 };
   private stillMs = 0;     // ako dlho je ruka nehybná (na automatické rozpoznanie otočenej polohy)
+  private rolledKnown = false; // poloha už bola aspoň raz určená (potom platí hysteréza)
   private isRolled = false; // rukavica je pri poslednom recentre otočená oproti základnej polohe -> vstavané osi ROLLED_PROFILE
   private refRoll: number | null = null; // krútenie (rad) v základnej polohe z globálnej kalibrácie
   private restAz = 0;
@@ -524,7 +536,8 @@ export class SingleIMUController {
   }
 
   private updateRolled() {
-    this.isRolled = isRolledRoll(this.restRoll);
+    this.isRolled = nextRolled(this.restRoll, this.rolledKnown ? this.isRolled : null);
+    this.rolledKnown = true;
   }
 
   /** Základná poloha rukavice (globálna kalibrácia) bez zmeny nulového bodu – podľa nej sa určí, o koľko je rukavica otočená. */
@@ -602,10 +615,19 @@ export class SingleIMUController {
     const hpX = aX - this.lpLinAccX;
     const hpY = aY - this.lpLinAccY;
 
-        const fingers = (sample.adc || []).slice(1,5);
-    const maxGrip = fingers.length ? Math.max(...fingers.map(normalizeAdc)) : 0;
-    if (!this.gripActive && maxGrip > this.pickThreshold) this.gripActive = true;
-    else if (this.gripActive && maxGrip < this.releaseThreshold) this.gripActive = false;
+    const fingerCount = sample.fingers?.count;
+    if (typeof fingerCount === 'number') {
+      // Kalibrované prsty: stisk = aspoň 4 prsty, uvoľnenie = najviac 2 (jeden-dva prsty zopnú aj pri samotnom pohybe zápästia)
+      if (!this.gripActive && fingerCount >= 4) this.gripActive = true;
+      else if (this.gripActive && fingerCount <= 2) this.gripActive = false;
+    } else {
+      // Pôvodné pravidlo (Tetris, presúvanie blokov). Pozor: surové ADC je v tisícoch aj v pokoji, takže |adc|/128 > 0,4 platí stále
+      // a stisk je v tomto režime trvalo zapnutý – automatické rozpoznanie polohy a učenie preto bežia len s `sample.fingers`.
+      const fingers = (sample.adc || []).slice(1, 5);
+      const maxGrip = fingers.length ? Math.max(...fingers.map(normalizeAdc)) : 0;
+      if (!this.gripActive && maxGrip > this.pickThreshold) this.gripActive = true;
+      else if (this.gripActive && maxGrip < this.releaseThreshold) this.gripActive = false;
+    }
 
     const precision = this.gripActive ? this.precisionScale : 1.0;
 
@@ -616,7 +638,7 @@ export class SingleIMUController {
     this.stillMs = stillNow && !this.freezePose ? this.stillMs + dtSec * 1000 : 0;
     if (this.stillMs > 700 && !this.gripActive && imu.quat && imu.quat.w !== undefined) {
       this.stillMs = 0;
-      if (isRolledRoll(gravityAngles(imu.quat).rho) !== this.isRolled) {
+      if (nextRolled(gravityAngles(imu.quat).rho, this.isRolled) !== this.isRolled) {
         this.recenter(sample.imu); // nový nulový bod v zistenej polohe; ďalej pokračuje tento istý update
       }
     }

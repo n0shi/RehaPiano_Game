@@ -294,7 +294,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
       applyAxisCorr(ctrl, left ? 'left' : 'right');
       ctrl.freezePose = penRef.current; // počas ťahu sa nulový bod nesmie meniť (vznikla by neviditeľná stena)
       const seqBefore = ctrl.recenterSeq;
-      const out = ctrl.update({ imu: d.imu || {}, adc: d.adc || [], ts: now } as any, dt);
+      const out = ctrl.update({ imu: d.imu || {}, adc: d.adc || [], ts: now, fingers: d.fingers } as any, dt);
       rolledRef.current = !!out.rolled;
       if (ctrl.recenterSeq !== seqBefore) {
         // kontrolér sám vynuloval náklon (rozpoznal otočenú ruku): kotva ostane pod kurzorom, aby kurzor nevyletel späť k starej kotve

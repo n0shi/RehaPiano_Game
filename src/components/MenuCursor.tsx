@@ -59,8 +59,11 @@ export function MenuCursor({ screen, leftHand }: Props) {
       c.tiltDeadzone = TILT_DEADZONE;
       // bez saturácie: pri okraji sa dá kurzor vždy odtiahnuť späť. Mŕtva zóna ostáva (predvolených 0,05 rad): bez nej sa kurzor
       // v pokoji "túla" (v zázname ~110 px pri pokoji, s ňou ~12 px) – kvôli chveniu ruky
-      c.autoReach = true; // dosah výchylky sa vyrovná medzi smermi a medzi polohami
-      c.autoAxes = true; // osi otočenej polohy sa spresňujú z ťahov ruky
+      // autoReach a autoAxes ostávajú vypnuté. Do opravy stisku v kontroléri (sample.fingers) nikdy nebežali, hoci tu boli zapnuté;
+      // po oprave ich prehratie záznamov (tools/replay.sh) ukázalo ako horšie: bočná odchýlka v zvyčajnej polohe 0,31 -> 0,37 a rozptyl
+      // dosahu medzi smermi 2,7x -> 3,0x (zosilnenie sa učí z malých výchyliek a veľký pohyb potom preletí).
+      c.autoReach = false;
+      c.autoAxes = false;
       // otočená poloha (kosť na 90°): zvislé pohyby boli slabšie než vodorovné a hore kurzor ušiel doľava. Laditeľné v konzole:
       // localStorage.setItem('rehapiano.menuRolled', '{"up":1.4,"down":1.7,"shear":-0.2}') a obnoviť stránku
       c.rolledTune = { up: 1.4, down: 1.7, shear: -0.2 };
@@ -158,7 +161,7 @@ export function MenuCursor({ screen, leftHand }: Props) {
       const left = p.handMode === 'dual' ? false : d.hand === 'left' ? true : d.hand === 'right' ? false : p.leftHand;
       applyAxisCorr(ctrl, left ? 'left' : 'right');
       const seqBefore = ctrl.recenterSeq;
-      const out = ctrl.update({ imu: d.imu || {}, adc: d.adc || [], ts: now } as any, dt);
+      const out = ctrl.update({ imu: d.imu || {}, adc: d.adc || [], ts: now, fingers: d.fingers } as any, dt);
 
       if (ctrl.recenterSeq !== seqBefore) { anchor.x = pos.x; anchor.y = pos.y; } // kontrolér sám vynuloval náklon: kurzor ostane na mieste
 
