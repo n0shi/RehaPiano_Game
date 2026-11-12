@@ -9,6 +9,9 @@ import { Target, Settings, Plus, Minus } from 'lucide-react';
 import { WebSocketStatus } from './components/WebSocketStatus';
 import { MenuCursor } from './components/MenuCursor';
 import { ShapeTraceModal } from './components/ShapeTraceModal';
+import { AuthScreen } from './components/AuthScreen';
+import { AccountBadge } from './components/AccountPanel';
+import { useAuth } from './context/AuthContext';
 import {
   FingerCalibration,
   LEFT_HAND_KEYS,
@@ -41,6 +44,13 @@ export default function App() {
   });
   const [userAdjusted, setUserAdjusted] = useState(false);
   const [showShapeTrace, setShowShapeTrace] = useState(false);
+  // Hrať sa dá až po prihlásení a voľbe záznamu dát; po odhlásení sa aplikácia vráti na začiatok
+  const { sessionStarted } = useAuth();
+  useEffect(() => {
+    if (!sessionStarted) { setScreen('menu'); setShowShapeTrace(false); }
+  }, [sessionStarted]);
+  // klávesové skratky menu neplatia pri písaní do poľa formulára (profil, prihlásenie)
+  const typing = (e: KeyboardEvent) => !!(e.target as HTMLElement | null)?.closest?.('input, textarea, select');
 
   useEffect(() => {
     if (!cfg) return;
@@ -60,9 +70,10 @@ export default function App() {
 
   // Klávesové skratky v menu
   useEffect(() => {
-    if (screen !== 'menu') return;
+    if (screen !== 'menu' || !sessionStarted) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (typing(e)) return;
       const key = e.key.toLowerCase();
 
       if (key === 'l') {
@@ -82,13 +93,14 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [screen, setActiveHand, startDualMode]);
+  }, [screen, setActiveHand, startDualMode, sessionStarted]);
 
   // Klávesové skratky pre výber hry
   useEffect(() => {
-    if (screen !== 'gameSelection') return;
+    if (screen !== 'gameSelection' || !sessionStarted) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (typing(e)) return;
       const key = e.key.toLowerCase();
 
       if (key === 'l' && !dualHands) {
@@ -104,7 +116,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [screen, dualHands]);
+  }, [screen, dualHands, sessionStarted]);
 
   const handleHandSelection = (leftHand: boolean) => {
     setUseLeftHand(leftHand);
@@ -401,6 +413,16 @@ export default function App() {
     setScreen('gameSelection');
   };
 
+  if (!sessionStarted) {
+    // WebSocketStatus ostáva pripojený (drží spojenie s rukavicou), hra sa sprístupní až po prihlásení
+    return (
+      <>
+        <WebSocketStatus hideCalibrationButton />
+        <AuthScreen />
+      </>
+    );
+  }
+
   return (
     <>
       <WebSocketStatus
@@ -411,6 +433,8 @@ export default function App() {
       {(screen === 'menu' || screen === 'gameSelection') && !showShapeTrace && (
         <MenuCursor screen={screen} leftHand={useLeftHand} />
       )}
+
+      {(screen === 'menu' || screen === 'gameSelection') && !showShapeTrace && <AccountBadge />}
 
       {(screen === 'menu' || screen === 'gameSelection') && !showShapeTrace && (
         <button

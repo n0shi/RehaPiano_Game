@@ -6,6 +6,7 @@ import { loadConfig } from './config/config';
 import { ConfigProvider } from './config/ConfigContext';
 import { CalibrationProvider } from './context/CalibrationContext';
 import { ModalProvider } from './context/ModalContext';
+import { AuthProvider } from './context/AuthContext';
 
 async function bootstrap() {
   const cfg = await loadConfig();
@@ -15,7 +16,9 @@ async function bootstrap() {
       <ConfigProvider config={cfg}>
         <CalibrationProvider>
           <ModalProvider>
-            <App />
+            <AuthProvider>
+              <App />
+            </AuthProvider>
           </ModalProvider>
         </CalibrationProvider>
       </ConfigProvider>
@@ -31,7 +34,11 @@ bootstrap().catch((err) => {
   root.render(
     <React.StrictMode>
       <CalibrationProvider>
-        <App />
+        <ModalProvider>
+          <AuthProvider>
+            <App />
+          </AuthProvider>
+        </ModalProvider>
       </CalibrationProvider>
     </React.StrictMode>,
   );

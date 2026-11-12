@@ -104,7 +104,7 @@ export function MenuCursor({ screen, leftHand }: Props) {
     const targetAt = (x: number, y: number): HTMLElement | null => {
       const el = document.elementFromPoint(x, y);
       const t = el?.closest('button, a, [role="button"]') as HTMLElement | null;
-      if (!t || (t as HTMLButtonElement).disabled) return null;
+      if (!t || (t as HTMLButtonElement).disabled || t.closest('[data-no-glove]')) return null; // data-no-glove: len myšou (účet, odhlásenie)
       return t;
     };
 
