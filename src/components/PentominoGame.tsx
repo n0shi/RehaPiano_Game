@@ -30,6 +30,8 @@ import { gripOf } from '../utils/fingerCalibration';
 import { applyCursorModel, currentCursorModel } from '../utils/cursorModel';
 import { useAuth } from '../context/AuthContext';
 import { SessionRecorder } from '../utils/sessionRecorder';
+import { SpeedGain, PENTOMINO_SPEED_GAIN } from '../utils/speedGain';
+import { addResult } from '../utils/results';
 import { fuseSigned, DUAL_LEFT_GYRO_SIGN } from '../utils/dualHands';
 import { CursorGripInput } from '../utils/cursorInput';
 import { PieceManipulator, type ManipSnapshot, type CommitInfo } from '../utils/pieceManip';
@@ -46,6 +48,9 @@ const HAND_POS_GAIN = 1;
 // vodorovne menší rozsah. Hore/dole ostáva 1 (funguje dobre).
 const HAND_X_GAIN = 1.7;
 const HAND_Y_SCALE = 1;
+// Zosilnenie podľa rýchlosti ruky (utils/speedGain.ts): pomalý pohyb ×0,6 (presné dosadnutie, menej chvenia), rýchly ×1,3 (dosah).
+// false = pevné zosilnenie ako predtým.
+const HAND_SPEED_GAIN = true;
 const HAND_RESPONSE_CURVE = 0;
 const HAND_TILT_DEADZONE = 0;
 // Menej vyhladenia ako v kreslení (0,35 + posAlpha 0,28 dávalo ~50 ms oneskorenia); bloky idú po bunkách s hysteréziou,
@@ -248,6 +253,8 @@ export function PentominoGame({
   // Záznam dát z rukavice počas hry (len so súhlasom prihláseného používateľa; pozri utils/sessionRecorder.ts)
   const { user: authUser, recordConsent } = useAuth();
   const recRef = useRef<SessionRecorder | null>(null);
+  const speedGainRef = useRef(new SpeedGain(PENTOMINO_SPEED_GAIN));
+  const speedGainSeqRef = useRef(-1);
   const recUserId = authUser?.id;
   useEffect(() => {
     if (!recUserId || !recordConsent) return;
@@ -571,7 +578,11 @@ export function PentominoGame({
         const rawBoth = dualL
           ? { x: (mainPos.x + dualL.out.posNorm.x) / 2, y: (mainPos.y - dualL.out.posNorm.y) / 2 }
           : mainPos;
-        const rawPos = { x: rawBoth.x * HAND_X_GAIN, y: rawBoth.y * HAND_Y_SCALE };
+        const rawLin = { x: rawBoth.x * HAND_X_GAIN, y: rawBoth.y * HAND_Y_SCALE };
+        // po vynulovaní náklonu surová poloha skočí k nule: zosilnenie podľa rýchlosti sa vtedy začína odznova
+        const seqNow = imuCtrlRef.current!.recenterSeq;
+        const rawPos = HAND_SPEED_GAIN ? speedGainRef.current.apply(rawLin, dt, speedGainSeqRef.current !== seqNow) : rawLin;
+        speedGainSeqRef.current = seqNow;
         const anchor = anchorRef.current;
         // Zámok osi kurzora (pozri AXIS_LOCK_*): bočná zložka pohybu sa pri pohybe po osi odpočíta cez kotvu.
         {
@@ -767,6 +778,7 @@ export function PentominoGame({
         setShowRestPopup(false);
         // Zaznamenaj trvanie tohto dokončeného levelu
         const duration = Math.floor((Date.now() - levelStartRef.current) / 1000);
+        addResult({ t: Date.now(), kind: 'pentomino', level: currentLevelIndex + 1, seconds: duration }); // pokrok používateľa
         // Pridaj do levelDurations atomicky
             setLevelDurations((prev) => {
           const newArr = [...prev, duration];
