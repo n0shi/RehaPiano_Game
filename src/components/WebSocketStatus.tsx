@@ -4,6 +4,7 @@ import { useConfig } from '../config/ConfigContext';
 import { useCalibration } from '../context/CalibrationContext';
 import { useModal } from '../context/ModalContext';
 import { detectFingers } from '../utils/fingerCalibration';
+import { ReconnectingSocket } from '../utils/reconnectingSocket';
 
 interface WebSocketStatusProps {
   renderCalibrationButton?: (connected: boolean) => ReactNode;
@@ -25,31 +26,26 @@ export function WebSocketStatus({ renderCalibrationButton, hideCalibrationButton
       return;
     }
 
-    // Použiť WebSocket prehliadača
-    const ws = new WebSocket(cfg.WEBSOCKET_URL);
-
-    ws.onopen = () => {
-      console.log('Pripojený k streameru');
-      setConnected(true);
+    // Spojenie sa po strate samo obnovuje (utils/reconnectingSocket.ts): reštart streamera ani odpojenie rukavice
+    // už nevyžadujú obnovenie stránky.
+    const setStatus = (v: boolean) => {
+      console.log(v ? 'Pripojený k streameru' : 'Odpojený od streamera, skúšam sa pripojiť znova');
+      setConnected(v);
       // Nastaviť globálny stav a odoslať event pre ostatné komponenty
-      (window as any).__wsConnected = true;
-      window.dispatchEvent(new CustomEvent('ws-connection-change', { detail: { connected: true } }));
+      (window as any).__wsConnected = v;
+      window.dispatchEvent(new CustomEvent('ws-connection-change', { detail: { connected: v } }));
     };
-
-    ws.onmessage = (evt) => {
-      try {
-        const parsed =
-          typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
-        // Ak ide o vzorku zo senzora, znovu ju vysielame ako window event tak,
-        // aby hry/komponenty mohli počúvať IMU/tensometer aktualizácie bez priameho
-        // vlastníctva socketu.
+    const socket = new ReconnectingSocket({
+      url: cfg.WEBSOCKET_URL,
+      onStatus: setStatus,
+      onMessage: (data) => {
         try {
+          const parsed = typeof data === 'string' ? JSON.parse(data) : (data as any);
+          // Ak ide o vzorku zo senzora, znovu ju vysielame ako window event tak,
+          // aby hry/komponenty mohli počúvať IMU/tensometer aktualizácie bez priameho
+          // vlastníctva socketu.
           // očakávaný tvar: { kind: 'sample', adc: [...], imu: { gyroX, gyroY, gyroZ }, ... }
-          if (
-            parsed &&
-            typeof parsed === 'object' &&
-            (parsed.kind === 'sample' || parsed.adc)
-          ) {
+          if (parsed && typeof parsed === 'object' && (parsed.kind === 'sample' || parsed.adc)) {
             const evtDetail = {
               adc: parsed.adc || [],
               imu: parsed.imu || { gyroX: 0, gyroY: 0, gyroZ: 0 },
@@ -59,39 +55,15 @@ export function WebSocketStatus({ renderCalibrationButton, hideCalibrationButton
               // stav prstov podľa kalibrácie človeka (alebo pôvodného pevného prahu); počíta sa raz na vzorku kvôli hysteréze a driftu
               fingers: detectFingers(parsed.adc, parsed.hand, cfg),
             };
-            window.dispatchEvent(
-              new CustomEvent('imu-sample', { detail: evtDetail }),
-            );
+            window.dispatchEvent(new CustomEvent('imu-sample', { detail: evtDetail }));
           }
-        } catch (e) {
-          // ignorovať chyby pri preposielaní
+        } catch (err) {
+          console.warn('Nečitateľné WS dáta', err);
         }
-      } catch (err) {
-        console.warn('Nečitateľné WS dáta', err);
-      }
-    };
+      },
+    });
 
-    ws.onerror = (err) => {
-      console.error('WebSocket chyba:', err);
-      setConnected(false);
-      (window as any).__wsConnected = false;
-      window.dispatchEvent(new CustomEvent('ws-connection-change', { detail: { connected: false } }));
-    };
-
-    ws.onclose = () => {
-      console.log('Odpojený od streameru');
-      setConnected(false);
-      (window as any).__wsConnected = false;
-      window.dispatchEvent(new CustomEvent('ws-connection-change', { detail: { connected: false } }));
-    };
-
-    return () => {
-      try {
-        ws.close();
-      } catch (e) {
-        /* ignorovať */
-      }
-    };
+    return () => socket.dispose();
   }, [cfg.WEBSOCKET_URL]);
 
   if (isModalOpen) return null;
