@@ -2,9 +2,16 @@
 // (utils/userScope.ts); ukladajú sa vždy pre prihláseného používateľa, nezávisle od súhlasu so záznamom surových dát z rukavice.
 import { scopedKey, currentUserScope } from './userScope';
 
-export type DrawingResult = { t: number; kind: 'drawing'; shape: string; level: number; score: number; accuracy: number; coverage: number };
+export type DrawingResult = { t: number; kind: 'drawing'; shape: string; level: number; score: number; accuracy: number; coverage: number; scoring?: 'normal' | 'hard' }; // scoring: režim hodnotenia (staršie záznamy bez neho = 'hard')
 export type PentominoResult = { t: number; kind: 'pentomino'; level: number; seconds: number };
 export type GameResult = DrawingResult | PentominoResult;
+
+/**
+ * Kresba sa počíta ako pokus, len keď je tvar obkreslený celý: aspoň tento podiel obrysu musí mať ťah vo svojej blízkosti.
+ * Platí pri ukladaní (ShapeTraceModal) aj pri čítaní: staršie záznamy vznikali z každého ťahu (aj z náhodného stisku
+ * s pokrytím pár percent a skóre ~0) a kazili priemery a trend.
+ */
+export const DRAW_COMPLETE_COVERAGE = 0.6;
 
 const KEY = 'rehapiano.results.v1';
 const MAX_RESULTS = 3000; // najstaršie sa zahodia
@@ -58,7 +65,7 @@ export type Progress = {
 };
 
 export function summarize(results: GameResult[]): Progress {
-  const dr = results.filter((r): r is DrawingResult => r.kind === 'drawing').sort((a, b) => a.t - b.t);
+  const dr = results.filter((r): r is DrawingResult => r.kind === 'drawing' && r.coverage >= DRAW_COMPLETE_COVERAGE).sort((a, b) => a.t - b.t);
   const pe = results.filter((r): r is PentominoResult => r.kind === 'pentomino').sort((a, b) => a.t - b.t);
   const shapes = new Map<string, number[]>();
   for (const r of dr) (shapes.get(r.shape) ?? shapes.set(r.shape, []).get(r.shape)!).push(r.score);
