@@ -17,7 +17,8 @@ import {
   PlacedPiece,
   PentominoLevel,
   canPlacePiece,
-  findNearestValidPosition,
+  findStartPosition,
+  fitsOnGrid,
   placePiece,
   removePiece,
   isLevelComplete,
@@ -208,6 +209,8 @@ export function PentominoGame({
   const inputRef = useRef<CursorGripInput | null>(null);
   const commitPieceRef = useRef<(info: CommitInfo) => void>(() => {});
   const playableRef = useRef(true);
+  const wonKeyRef = useRef<string | null>(null);        // level (index:reload), ktorého výhra sa už zaznamenala
+  const finishLevelRef = useRef<() => void>(() => {});
   const showImuDebugRef = useRef(false);
   useEffect(() => { gridRef.current = grid; }, [grid]);
   useEffect(() => { availableRef.current = availablePieces; }, [availablePieces]);
@@ -302,42 +305,30 @@ export function PentominoGame({
       return shape;
     });
 
-    // Ak existujú štartovacie pozície, umiestni kúsky na grid
-  const initialPlacedPieces: PlacedPiece[] = [];
-    if (currentLevel.startingPositions && currentLevel.startingPositions.length > 0) {
-      currentLevel.startingPositions.forEach((pos, index) => {
-        if (index < pieces.length) {
-          const shape = pieces[index];
-          
-          // Skontroluj či kúsok sa zmestí na pozíciu
-          const pieceRows = shape.grid.length;
-          const pieceCols = shape.grid[0] ? shape.grid[0].length : 0;
-          
-          if (pos.row < 0 || pos.col < 0 || 
-              pos.row + pieceRows > GRID_HEIGHT || 
-              pos.col + pieceCols > GRID_WIDTH) {
-            return;
-          }
-          
-          const piece: PlacedPiece = {
-            shapeId: shape.id,
-            grid: shape.grid,
-            row: pos.row,
-            col: pos.col,
-            color: shape.color,
-            uid: genUid(),
-          };
-          
-          // Umiestni blok na grid
-          try {
-            newGrid = placePiece(newGrid, shape.grid, pos.row, pos.col, shape.color);
-            initialPlacedPieces.push(piece);
-          } catch (error) {
-            console.error('❌ Failed to place piece:', shape.id, error);
-          }
-        }
-      });
-    }
+    // Všetky bloky levelu ležia od začiatku na poli (zásobník blokov mimo poľa hra nemá). Blok so štartovacou pozíciou
+    // z levelu ide na ňu; blok bez pozície, s pozíciou mimo poľa alebo cez iný blok dostane voľné miesto mimo cieľového tvaru
+    // (predtým sa taký blok potichu zahodil a level sa nedal dokončiť).
+    const initialPlacedPieces: PlacedPiece[] = [];
+    const place = (shape: PentominoShape, row: number, col: number) => {
+      newGrid = placePiece(newGrid, shape.grid, row, col, shape.color);
+      initialPlacedPieces.push({ shapeId: shape.id, grid: shape.grid, row, col, color: shape.color, uid: genUid() });
+    };
+    const withoutPosition: PentominoShape[] = [];
+    pieces.forEach((shape, index) => {
+      const pos = currentLevel.startingPositions?.[index];
+      if (pos && Number.isInteger(pos.row) && Number.isInteger(pos.col) && fitsOnGrid(newGrid, shape.grid, pos.row, pos.col)) {
+        place(shape, pos.row, pos.col);
+      } else {
+        if (pos) console.warn(`Pentomino level ${currentLevel.id}: štartovacia pozícia bloku ${shape.id} (#${index}) je mimo poľa alebo cez iný blok, vyberám voľné miesto`);
+        withoutPosition.push(shape);
+      }
+    });
+    // až po blokoch s pevnou pozíciou, aby im automaticky umiestnený blok nezabral miesto
+    withoutPosition.forEach((shape) => {
+      const pos = findStartPosition(newGrid, shape.grid, currentLevel.targetShape);
+      if (pos) place(shape, pos.row, pos.col);
+      else console.error(`Pentomino level ${currentLevel.id}: pre blok ${shape.id} nie je na poli voľné miesto`);
+    });
 
   setGrid(newGrid);
   setPlacedPieces(initialPlacedPieces);
@@ -356,11 +347,8 @@ export function PentominoGame({
   manipRef.current?.reset();
   inputRef.current?.reset();
     
-    // Dostupné kúsky sú len tie, ktoré ešte nie sú umiestnené
-    const unusedPieces = currentLevel.startingPositions && currentLevel.startingPositions.length > 0
-      ? []
-      : pieces;
-    setAvailablePieces(unusedPieces);
+    setAvailablePieces([]); // všetky bloky sú na poli (pozri vyššie)
+    wonKeyRef.current = null;
     setShowRestPopup(false);
     // Reset štatistík pri načítaní úrovne (ak začíname od prvého)
     if (currentLevelIndex === 0) {
@@ -762,80 +750,67 @@ export function PentominoGame({
 
 
   // Kontrola výhry
-  // Level sa vyhodnotí až keď hráč PUSTÍ blok (nie počas držania)
+  // Level sa vyhodnotí až keď hráč PUSTÍ blok (nie počas držania). Výhra sa pre daný level zaznamená raz (wonKeyRef) a popup
+  // "Oddýchnite si" má vlastný časovač závislý len od showRestPopup. Predtým časovač bežal v tomto effecte a zrušila ho každá
+  // zmena poľa (Krok späť, chytenie bloku myšou počas popupu): popup potom ostal visieť a rukavica bola vypnutá.
+  const levelKey = `${currentLevelIndex}:${reloadKey}`;
   useEffect(() => {
     if (!currentLevel || placedPieces.length === 0) return;
-    
+    if (wonKeyRef.current === levelKey) return;
+    // Pole ešte patrí predchádzajúcemu levelu (nový level sa práve načítava)
+    if (grid !== gridRef.current) return;
     // Nespúšťaj kontrolu výhry ak je aktívny grip (hráč ešte drží blok)
     if (grabbedRef.current) return;
     // Nespúšťaj kontrolu výhry ak sa ťahá blok myšou
     if (draggingPiece) return;
+    if (showFinishedModal) return;
 
     if (isLevelComplete(grid, currentLevel.targetShape)) {
-      // Zobraz popup na oddych a potom automaticky prejdi na ďalší level
+      wonKeyRef.current = levelKey;
       setShowRestPopup(true);
-      const timeout = setTimeout(() => {
-        setShowRestPopup(false);
-        // Zaznamenaj trvanie tohto dokončeného levelu
-        const duration = Math.floor((Date.now() - levelStartRef.current) / 1000);
-        addResult({ t: Date.now(), kind: 'pentomino', level: currentLevelIndex + 1, seconds: duration }); // pokrok používateľa
-        // Pridaj do levelDurations atomicky
-            setLevelDurations((prev) => {
-          const newArr = [...prev, duration];
-          // Ak toto bol posledný level, vypočítaj najdlhší a zobraz modal
-          if (currentLevelIndex >= levels.length - 1) {
-            if (newArr.length > 0) {
-              let max = -1;
-              let idx = 0;
-              newArr.forEach((d, i) => {
-                if (d > max) {
-                  max = d;
-                  idx = i;
-                }
-              });
-              setLongestLevelIndex(idx);
-              setLongestLevelTime(max);
-            }
-          }
-          return newArr;
-        });
-
-            // Zaznamenaj koľko kúskov bolo uložených v tomto leveli (unikátne používateľské interakcie)
-            setLevelPlacedCounts((prev) => {
-              const userPlaced = levelUserPlacedRef.current.size;
-              const newArr = [...prev, userPlaced];
-              const total = newArr.reduce((a, b) => a + b, 0);
-              setTotalPlacedCount(total);
-              return newArr;
-            });
-
-        if (currentLevelIndex < levels.length - 1) {
-          setCurrentLevelIndex((i) => i + 1);
-        } else {
-          // Posledný level -> zobraz modal so štatistikami, ale len ak hráč dosiahol aspoň level 2
-          const reachedLevelTwo = currentLevelIndex >= 1; // index 1 == level 2
-          if (reachedLevelTwo) {
-            setTimeTaken(Math.floor((Date.now() - startTimeRef.current) / 1000));
-            setShowFinishedModal(true);
-          } else {
-            // Nedosiahol level 2 — vráť sa do menu
-            onBackToMenu();
-          }
-        }
-      }, cfg?.COFFEE_BREAK ?? 1000);
-
-      return () => clearTimeout(timeout);
     }
-  }, [grid, currentLevel, placedPieces, isGripping, draggingPiece]);
+  }, [grid, currentLevel, placedPieces, isGripping, draggingPiece, levelKey, showFinishedModal]);
 
-  const handleNextLevel = () => {
+  // Po oddychu: zaznamenaj výsledok levelu a prejdi na ďalší (alebo ukáž štatistiky po poslednom)
+  finishLevelRef.current = () => {
+    setShowRestPopup(false);
+    // Zaznamenaj trvanie tohto dokončeného levelu
+    const duration = Math.floor((Date.now() - levelStartRef.current) / 1000);
+    addResult({ t: Date.now(), kind: 'pentomino', level: currentLevelIndex + 1, seconds: duration }); // pokrok používateľa
+    setLevelDurations((prev) => {
+      const newArr = [...prev, duration];
+      // Ak toto bol posledný level, vypočítaj najdlhší
+      if (currentLevelIndex >= levels.length - 1) {
+        let max = -1;
+        let idx = 0;
+        newArr.forEach((d, i) => { if (d > max) { max = d; idx = i; } });
+        setLongestLevelIndex(idx);
+        setLongestLevelTime(max);
+      }
+      return newArr;
+    });
+    // Zaznamenaj koľko kúskov bolo uložených v tomto leveli (unikátne používateľské interakcie)
+    setLevelPlacedCounts((prev) => {
+      const newArr = [...prev, levelUserPlacedRef.current.size];
+      setTotalPlacedCount(newArr.reduce((a, b) => a + b, 0));
+      return newArr;
+    });
+
     if (currentLevelIndex < levels.length - 1) {
-      setCurrentLevelIndex(currentLevelIndex + 1);
-      setShowRestPopup(false);
+      setCurrentLevelIndex((i) => i + 1);
+    } else if (currentLevelIndex >= 1) {
+      // Posledný level -> modal so štatistikami, ale len ak hráč dosiahol aspoň level 2 (index 1)
+      setTimeTaken(Math.floor((Date.now() - startTimeRef.current) / 1000));
+      setShowFinishedModal(true);
     } else {
       onBackToMenu();
     }
   };
+  useEffect(() => {
+    if (!showRestPopup) return;
+    const timeout = setTimeout(() => finishLevelRef.current(), cfg?.COFFEE_BREAK ?? 1000);
+    return () => clearTimeout(timeout);
+  }, [showRestPopup]);
 
   const handleRestart = () => {
     // Znovu načítaj aktuálny level zvýšením reloadKey, čo spustí inicializačný effect
@@ -861,7 +836,7 @@ export function PentominoGame({
 
   // Funkcia na vrátenie posledného ťahu (undo)
   const handleUndo = useCallback(() => {
-    if (historyStack.length === 0) return;
+    if (historyStack.length === 0 || showRestPopup) return; // level je už dokončený
     
     const previousState = historyStack[historyStack.length - 1];
     setHistoryStack(prev => prev.slice(0, -1));
@@ -877,24 +852,7 @@ export function PentominoGame({
     
     // Zníž počet ťahov
     setMovesCount(m => Math.max(0, m - 1));
-  }, [historyStack]);
-
-  const handlePieceMouseDown = (
-    e: React.MouseEvent,
-    shape: PentominoShape,
-    pieceGrid: boolean[][]
-  ) => {
-    e.preventDefault();
-    inputRef.current?.cancel(); // myš preberá ovládanie od rukavice
-    const rect = e.currentTarget.getBoundingClientRect();
-    // Offset je v screen koordinátach (už vyškálovaný) - prepočítaj na pôvodné jednotky
-    const currentScale = scaleRef.current || 1;
-    const offsetX = (e.clientX - rect.left) / currentScale;
-    const offsetY = (e.clientY - rect.top) / currentScale;
-
-    setDraggingPiece({ shape, grid: pieceGrid, offsetX, offsetY });
-    setDragPosition({ x: e.clientX, y: e.clientY });
-  };
+  }, [historyStack, showRestPopup]);
 
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
@@ -1596,6 +1554,7 @@ export function PentominoGame({
                   }}
                   onMouseDown={(e) => {
                     // Kliknutím sa vyberie kúsok, podržaním sa začne presúvanie
+                    if (showRestPopup) return; // level je dokončený: bloky sa už nehýbu
                     if (piece.uid !== activePieceId) {
                       setActivePieceId(piece.uid ?? null);
                       return;
@@ -1758,9 +1717,9 @@ export function PentominoGame({
               {/* Tlačidlo Krok späť */}
               <button
                 onClick={handleUndo}
-                disabled={historyStack.length === 0}
+                disabled={historyStack.length === 0 || showRestPopup}
                 className={`flex items-center justify-center gap-2 rounded-xl py-3 px-6 transition-colors w-full ${
-                  historyStack.length === 0
+                  historyStack.length === 0 || showRestPopup
                     ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
                     : 'bg-amber-500 hover:bg-amber-600 text-white'
                 }`}
@@ -1770,6 +1729,7 @@ export function PentominoGame({
               </button>
               <button
                 onClick={() => {
+                  setShowRestPopup(false); // zruší aj časovač prechodu na ďalší level
                   const reachedLevelTwo = currentLevelIndex >= 1; // index 1 == level 2
                   if (reachedLevelTwo) {
                     // record current partial level duration
