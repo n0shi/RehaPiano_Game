@@ -4,7 +4,7 @@
 // Port z Tangram `rehapiano.js` (akcie nad hrou) prerobený z polygónov na bunkové pentominá: otáčanie sa potvrdzuje
 // po 90°, poloha sa po pustení zaokrúhli na bunku. Bez Reactu aj DOM – hra dostáva len snímky stavu na vykreslenie.
 import { rotatePentomino, flipPentomino } from '../data/pentominoShapes';
-import { findNearestValidPosition, fitsOnGrid, type PlacedPiece } from './pentominoUtils';
+import { findNearestValidPosition, type PlacedPiece } from './pentominoUtils';
 import { MOVE_START_CELLS, MOVE_STEP_MS, pieceStep } from './pieceMovement';
 import type { CursorActions, Vec2 } from './cursorInput';
 
@@ -24,6 +24,7 @@ const AXIS_UNLOCK_RATIO = 0.7;   // zámok sa uvoľní, keď druhá os dosiahne 
 // (applyAxisCorr / Kalibrácia osí), aby kurzor aj blok išli rovnako.)
 export const DROP_MAX_SHIFT = 3;
 export const GRAB_TOLERANCE = 0.6;      // kurzor do tejto vzdialenosti (bunky) od bloku ho ešte zachytí         // najviac o toľko buniek sa blok po pustení posunie do voľného miesta
+const WALL_SLACK_CELLS = 0.45;          // o koľko buniek smie cieľ presunu prečnievať za okraj poľa (viac sa z posunu ruky zahodí)
 const STEP_DEG = 90;
 
 export type LiveView = {
@@ -76,7 +77,6 @@ type Session = {
   dirty: boolean;                          // orientácia sa zmenila (rotácia / flip) – aj keď poloha ostane
   moveStarted: boolean;                    // režim krokov: ruka sa už posunula aspoň o MOVE_START_CELLS
   lastStepAt: number;
-  occ: boolean[][] | null;                 // režim krokov: zaplnenie bez tohto bloku (iné bloky sa počas ťahania nehýbu)
 };
 
 const sameGrid = (a: boolean[][], b: boolean[][]) =>
@@ -87,6 +87,40 @@ export function rotateSteps(grid: boolean[][], steps: number): boolean[][] {
   let g = grid;
   for (let i = 0; i < quarter; i++) g = rotatePentomino(g);
   return g;
+}
+
+/**
+ * Os otáčania bloku voči stredu jeho obdĺžnika (v bunkách). Blok s nepárnou + párnou stranou (P 2×3, U 3×2) má stred obdĺžnika
+ * na polovici bunky len v jednej osi; otočenie okolo neho by ľavý horný roh posunulo o pol bunky a zaokrúhlenie (vždy tým istým
+ * smerom) blok pri každom otočení posúvalo: R a potom E ho nevrátilo späť, 4× R ho posunulo o 2 bunky šikmo.
+ * Os sa preto posunie o pol bunky v párnej osi na stred bunky, a to na stranu ťažiska bloku. Ťažisko sa otáča spolu s blokom,
+ * takže os ostáva v tej istej bunke bloku pri každej orientácii a otáčanie je presné (4× 90° = pôvodná poloha).
+ */
+export function pivotOffset(grid: boolean[][]): Vec2 {
+  const h = grid.length, w = grid[0]?.length ?? 0;
+  if ((w + h) % 2 === 0) return { x: 0, y: 0 }; // obe strany párne alebo obe nepárne: stred obdĺžnika sa otáča na mriežku presne
+  let sx = 0, sy = 0, n = 0;
+  for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) if (grid[r][c]) { sx += c + 0.5 - w / 2; sy += r + 0.5 - h / 2; n++; }
+  const side = (v: number) => (v < -1e-9 ? -0.5 : 0.5);
+  return w % 2 === 0 ? { x: side(n ? sx / n : 0), y: 0 } : { x: 0, y: side(n ? sy / n : 0) };
+}
+
+/** Blok so stredom (cx, cy) otočený o `steps` × 90° okolo svojej osi otáčania: nová orientácia a nový stred obdĺžnika. */
+export function rotateAboutPivot(grid: boolean[][], cx: number, cy: number, steps: number) {
+  const g = rotateSteps(grid, steps);
+  if (g === grid) return { grid, cx, cy };
+  const a = pivotOffset(grid), b = pivotOffset(g);
+  return { grid: g, cx: cx + a.x - b.x, cy: cy + a.y - b.y };
+}
+
+/** Leží celý blok v poli? (počas držania sa kontrolujú len okraje poľa, nie iné bloky) */
+function insideBoard(grid: boolean[][], row: number, col: number, rows: number, cols: number): boolean {
+  for (let r = 0; r < grid.length; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c] && (row + r < 0 || row + r >= rows || col + c < 0 || col + c >= cols)) return false;
+    }
+  }
+  return true;
 }
 
 /** Zaplnenie mriežky všetkými blokmi okrem `skipUid`. */
@@ -215,7 +249,7 @@ export class PieceManipulator implements CursorActions {
     this.session = {
       uid: piece.uid, grid: piece.grid, cx, cy, shownX: cx, shownY: cy,
       orig: { grid: piece.grid, row: piece.row, col: piece.col },
-      grabbed: false, snapping: false, dirty: false, moveStarted: false, lastStepAt: 0, occ: null,
+      grabbed: false, snapping: false, dirty: false, moveStarted: false, lastStepAt: 0,
     };
     return this.session;
   }
@@ -255,9 +289,11 @@ export class PieceManipulator implements CursorActions {
 
   private computeGhost(s: Session): LiveView['ghost'] {
     const steps = Math.round(this.rotationAngle / STEP_DEG);
-    const g = rotateSteps(s.grid, steps);
+    // režim krokov: rovnaká os otáčania ako pri potvrdení (settleRotation), náhľad teda sedí s miestom dosadnutia
+    const rot = this.host.stepMove ? rotateAboutPivot(s.grid, s.cx, s.cy, steps) : { grid: rotateSteps(s.grid, steps), cx: s.cx, cy: s.cy };
+    const g = rot.grid;
     const h = g.length, w = g[0]?.length ?? 0;
-    const r0 = Math.round(s.cy - h / 2), c0 = Math.round(s.cx - w / 2);
+    const r0 = Math.round(rot.cy - h / 2), c0 = Math.round(rot.cx - w / 2);
     const key = `${s.uid}|${steps}|${r0}|${c0}|${s.dirty}|${s.grid === g}`;
     if (key === this.ghostKey) return this.ghost;
     this.ghostKey = key;
@@ -368,7 +404,7 @@ export class PieceManipulator implements CursorActions {
     this.session = {
       uid: hit.uid, grid: hit.grid, cx, cy, shownX: cx, shownY: cy,
       orig: { grid: hit.grid, row: hit.row, col: hit.col },
-      grabbed: true, snapping: false, dirty: false, moveStarted: false, lastStepAt: 0, occ: null,
+      grabbed: true, snapping: false, dirty: false, moveStarted: false, lastStepAt: 0,
     };
     this.startPosition = position;
     this.startCx = cx;
@@ -392,7 +428,12 @@ export class PieceManipulator implements CursorActions {
 
   /**
    * Pôvodné ťahanie: cieľ = štart + posun ruky v bunkách; blok sa k nemu približuje najviac o jeden krok (2–3 pri veľkej
-   * vzdialenosti) za MOVE_STEP_MS a berie prvý krok, ktorý sa zmestí (hranice, kolízie), takže kĺže popri stene aj bloku.
+   * vzdialenosti) za MOVE_STEP_MS a berie prvý krok, ktorý sa zmestí do poľa, takže kĺže popri stene.
+   *
+   * Iné bloky držaný blok NEZASTAVUJÚ: ide ponad ne (kreslí sa navrchu) a až po pustení dosadne na najbližšie voľné miesto
+   * (finish; náhľad dosadnutia ho ukazuje vopred). Predtým sa o iný blok zastavil, ale krok o 2–3 bunky kontroloval len cieľ,
+   * takže tenkú prekážku po chvíli preskočil a za hrubou ostal stáť, kým sa ruka nevrátila o celú "natiahnutú" vzdialenosť.
+   * Pevné bloky by navyše znemožnili vložiť posledný blok do miesta obkoleseného ostatnými.
    */
   private stepTo(s: Session, position: Vec2) {
     const start = this.startPosition;
@@ -430,15 +471,24 @@ export class PieceManipulator implements CursorActions {
         gx = 0;
       }
     }
+    const rows = this.host.rows(), cols = this.host.cols();
+    const h = s.grid.length, w = s.grid[0]?.length ?? 0;
+    // Okraj poľa: cieľ smie byť najviac WALL_SLACK_CELLS za krajnou polohou bloku. Zvyšok posunu ruky sa zahodí (posunie sa
+    // referenčná poloha), takže po obrátení smeru sa blok pohne hneď a ruka sa nemusí vracať o to, čo "pretlačila" za stenu.
+    const ref = this.startPosition!;
+    const overX = Math.max(0, this.startCx + gx - (cols - w / 2 + WALL_SLACK_CELLS)) + Math.min(0, this.startCx + gx - (w / 2 - WALL_SLACK_CELLS));
+    const overY = Math.max(0, this.startCy + gy - (rows - h / 2 + WALL_SLACK_CELLS)) + Math.min(0, this.startCy + gy - (h / 2 - WALL_SLACK_CELLS));
+    if (overX || overY) {
+      this.startPosition = { x: ref.x + overX / (cols / 2), y: ref.y + overY / (rows / 2) };
+      gx -= overX; gy -= overY;
+    }
     const dX = Math.round(gx), dY = Math.round(gy);
     const now = this.scheduler.now();
     if (now - s.lastStepAt < MOVE_STEP_MS) return;
-    const h = s.grid.length, w = s.grid[0]?.length ?? 0;
     const candidates = pieceStep(this.startCx + dX - s.cx, this.startCy + dY - s.cy, true);
     if (!candidates.length) return;
-    s.occ ??= occupancyWithout(this.host.rows(), this.host.cols(), this.host.pieces(), s.uid);
     const row = Math.round(s.cy - h / 2), col = Math.round(s.cx - w / 2);
-    const chosen = candidates.find((cd) => fitsOnGrid(s.occ!, s.grid, row + cd.dr, col + cd.dc));
+    const chosen = candidates.find((cd) => insideBoard(s.grid, row + cd.dr, col + cd.dc, rows, cols));
     if (!chosen) return;
     s.cx += chosen.dc;
     s.cy += chosen.dr;
@@ -499,7 +549,11 @@ export class PieceManipulator implements CursorActions {
     if (!s || s.snapping) return;
     const steps = Math.round(this.rotationAngle / STEP_DEG);
     if (steps !== 0) {
-      s.grid = rotateSteps(s.grid, steps);
+      if (this.host.stepMove) {
+        // otočenie okolo bunky bloku (pivotOffset): ľavý horný roh ostáva na celých bunkách a blok sa otáčaním neposúva
+        const rot = rotateAboutPivot(s.grid, s.cx, s.cy, steps);
+        s.grid = rot.grid; s.cx = rot.cx; s.cy = rot.cy;
+      } else s.grid = rotateSteps(s.grid, steps);
       s.dirty = true;
     }
     // Zachová sa rovnaká viditeľná poloha: potvrdená geometria + zostatok uhla.
@@ -508,7 +562,7 @@ export class PieceManipulator implements CursorActions {
     this.rotationSettling = true;
     this.ghostKey = '';
     if (this.host.stepMove) {
-      // po otočení okolo stredu môže byť ľavý horný roh na polovici bunky: vráť ho na celé bunky
+      // poistka proti nepresnosti desatinných čísel: ľavý horný roh na celé bunky (po rotateAboutPivot už na nich je)
       const h = s.grid.length, w = s.grid[0]?.length ?? 0;
       s.cx = Math.round(s.cx - w / 2) + w / 2;
       s.cy = Math.round(s.cy - h / 2) + h / 2;
