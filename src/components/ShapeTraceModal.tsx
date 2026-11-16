@@ -6,7 +6,7 @@ import { applyCursorModel, currentCursorModel } from '../utils/cursorModel';
 import { useAuth } from '../context/AuthContext';
 import { SessionRecorder } from '../utils/sessionRecorder';
 import { addResult, DRAW_COMPLETE_COVERAGE } from '../utils/results';
-import { outline, evaluate, SCORING, REF_SCALE, MIN_STROKE_POINTS, type ShapeKey, type Pt, type Result, type ScoringMode } from '../utils/drawingScore';
+import { outline, evaluate, sizeLabel, REF_SCALE, MIN_STROKE_POINTS, type ShapeKey, type Pt, type Result } from '../utils/drawingScore';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { MenuCursor } from './MenuCursor';
@@ -33,7 +33,6 @@ const LEVELS = [
   { level: 2, label: 'Úroveň 2', hint: 'stredný', scale: 0.24 },
   { level: 3, label: 'Úroveň 3', hint: 'veľký', scale: 0.32 },
 ];
-const SCORING_KEY = 'rehapiano.drawScoring';
 const SAMPLE_TIMEOUT_MS = 1500;
 const DATA_LOSS_MS = 2000;      // (stream sa každých ~40 s na ~1 s preruší a znovu pripojí, preto nie menej)  bez vzoriek dlhšie ako toto sa rozpracovaný ťah zahodí a pred ďalším treba uvoľniť prsty
 const CURSOR_COLOR = '#17647d';
@@ -64,14 +63,6 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
   const [phase, setPhase] = useState<'pick' | 'draw'>('pick');
   const [shapeKey, setShapeKey] = useState<ShapeKey>('circle');
   const [level, setLevel] = useState(3);
-  const [scoring, setScoring] = useState<ScoringMode>(() => {
-    try { return localStorage.getItem(SCORING_KEY) === 'hard' ? 'hard' : 'normal'; } catch { return 'normal'; }
-  });
-  const scoringRef = useRef(scoring); scoringRef.current = scoring;
-  const chooseScoring = (m: ScoringMode) => {
-    setScoring(m); setResult(null);
-    try { localStorage.setItem(SCORING_KEY, m); } catch { /* ignore */ }
-  };
   const [result, setResult] = useState<Result | null>(null);
   const [resultMouse, setResultMouse] = useState(false); // zobrazený výsledok je z kresby myšou (neukladá sa)
   const mouseStrokeRef = useRef(false);
@@ -164,15 +155,15 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
     const { w, h } = sizeRef.current;
     const s = Math.min(w, h) * scaleRef.current;
     const norm = tr.map(([x, y]) => [(x - w / 2) / s, (y - h / 2) / s] as Pt);
-    const res = evaluate(norm, shapeRef.current, REF_SCALE / scaleRef.current, scoringRef.current);
+    const res = evaluate(norm, shapeRef.current, REF_SCALE / scaleRef.current);
     if (!res) return; // bodka / náhodný stisk: nie je to pokus o tvar
     const mouse = mouseStrokeRef.current;
     setResult(res);
     setResultMouse(mouse);
-    recRef.current?.event({ type: 'result', points: tr.length, source: mouse ? 'mouse' : 'glove', scoring: scoringRef.current, ...res });
+    recRef.current?.event({ type: 'result', points: tr.length, source: mouse ? 'mouse' : 'glove', ...res });
     // Do pokroku používateľa ide len celý tvar nakreslený rukavicou: nedokončený ťah nie je meranie a kresba myšou nie je pohyb ruky
     if (res.complete && !mouse) {
-      addResult({ t: Date.now(), kind: 'drawing', shape: shapeKeyRef.current, level: levelRef.current, score: res.score, accuracy: res.accuracy, coverage: res.coverage, scoring: scoringRef.current });
+      addResult({ t: Date.now(), kind: 'drawing', shape: shapeKeyRef.current, level: levelRef.current, score: res.score, accuracy: res.accuracy, coverage: res.coverage });
     }
   }, []);
 
@@ -490,20 +481,6 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
       ))}
     </div>
   );
-  const scoringBtns = (
-    <div className="flex gap-2 items-center">
-      <span className="text-slate-600">Hodnotenie:</span>
-      {(Object.keys(SCORING) as ScoringMode[]).map((m) => (
-        <button
-          key={m}
-          onClick={() => chooseScoring(m)}
-          className={`px-4 py-2 rounded-xl font-medium transition-colors ${scoring === m ? 'bg-blue-600 text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
-        >
-          {SCORING[m].label}
-        </button>
-      ))}
-    </div>
-  );
   const btn = 'px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition-colors';
 
   return (
@@ -531,7 +508,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
           </div>
         </div>
 
-        {phase === 'pick' && <div className="mb-4 flex items-center gap-3 flex-wrap"><span className="text-slate-600">Úroveň:</span>{levelBtns}<span className="w-4" />{scoringBtns}</div>}
+        {phase === 'pick' && <div className="mb-4 flex items-center gap-3 flex-wrap"><span className="text-slate-600">Úroveň:</span>{levelBtns}</div>}
         {phase === 'pick' && (
           <div className="grid grid-cols-2 gap-4 flex-1">
             {SHAPES.map((s) => (
@@ -616,9 +593,9 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
                   )}
                   {result.complete && <div className="text-sm mt-1">Presnosť: {Math.round(result.accuracy * 100)} %</div>}
                   <div className="text-sm mt-1">Pokrytie obrysu: {Math.round(result.coverage * 100)} %</div>
-                  {result.complete && <div className="text-sm">Rozsah pohybu: {Math.round(result.range * 100)} % tvaru</div>}
+                  {result.complete && <div className="text-sm">Veľkosť kresby: {sizeLabel(result.size)}</div>}
                   {result.complete && resultMouse && <div className="text-xs text-amber-700 mt-1">Kreslené myšou – výsledok sa neukladá.</div>}
-                  <div className="text-xs text-slate-500 mt-2">Hodnotenie: {SCORING[scoring].label.toLowerCase()}. Stisnite prsty znova pre nový pokus.</div>
+                  <div className="text-xs text-slate-500 mt-2">Stisnite prsty znova pre nový pokus.</div>
                 </div>
               )}
             </div>

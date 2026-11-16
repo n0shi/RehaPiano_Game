@@ -2,7 +2,7 @@
 // (utils/userScope.ts); ukladajú sa vždy pre prihláseného používateľa, nezávisle od súhlasu so záznamom surových dát z rukavice.
 import { scopedKey, currentUserScope } from './userScope';
 
-export type DrawingResult = { t: number; kind: 'drawing'; shape: string; level: number; score: number; accuracy: number; coverage: number; scoring?: 'normal' | 'hard' }; // scoring: režim hodnotenia (staršie záznamy bez neho = 'hard')
+export type DrawingResult = { t: number; kind: 'drawing'; shape: string; level: number; score: number; accuracy: number; coverage: number; scoring?: 'normal' | 'hard' }; // scoring: len v záznamoch z obdobia s dvoma režimami; 'normal' (zhovievavý, takmer vždy 100) sa do pokroku neráta
 export type PentominoResult = { t: number; kind: 'pentomino'; level: number; seconds: number };
 export type GameResult = DrawingResult | PentominoResult;
 
@@ -65,7 +65,7 @@ export type Progress = {
 };
 
 export function summarize(results: GameResult[]): Progress {
-  const dr = results.filter((r): r is DrawingResult => r.kind === 'drawing' && r.coverage >= DRAW_COMPLETE_COVERAGE).sort((a, b) => a.t - b.t);
+  const dr = results.filter((r): r is DrawingResult => r.kind === 'drawing' && r.coverage >= DRAW_COMPLETE_COVERAGE && r.scoring !== 'normal').sort((a, b) => a.t - b.t);
   const pe = results.filter((r): r is PentominoResult => r.kind === 'pentomino').sort((a, b) => a.t - b.t);
   const shapes = new Map<string, number[]>();
   for (const r of dr) (shapes.get(r.shape) ?? shapes.set(r.shape, []).get(r.shape)!).push(r.score);

@@ -1,6 +1,6 @@
 // Skúška kreslenia: hodnotenie ťahu (utils/drawingScore.ts) a čo z neho ide do pokroku používateľa (utils/results.ts).
 import { describe, it, expect } from 'vitest';
-import { evaluate, outline, SCORING, type Pt, type ShapeKey } from '../drawingScore';
+import { evaluate, outline, sizeLabel, type Pt, type ShapeKey } from '../drawingScore';
 import { DRAW_COMPLETE_COVERAGE, summarize, type GameResult } from '../results';
 
 /** Kruh/oblúk s polomerom `rad` od podielu `from` po `to` obvodu; `tremor` = amplitúda chvenia kolmo na čiaru. */
@@ -38,10 +38,12 @@ describe('čo sa počíta ako nakreslený tvar', () => {
 });
 
 describe('presnosť', () => {
-  it.each(['circle', 'square', 'triangle', 'rhombus'] as ShapeKey[])('presne obkreslený %s má 100 v oboch režimoch', (key) => {
+  it.each(['circle', 'square', 'triangle', 'rhombus'] as ShapeKey[])('presne obkreslený %s má 100 a veľkosť rovnakú ako tvar', (key) => {
     const o = outline(key);
-    expect(evaluate([...o, o[0]], o, LEVEL3, 'normal')!.score).toBe(100);
-    expect(evaluate([...o, o[0]], o, LEVEL3, 'hard')!.score).toBe(100);
+    const r = evaluate([...o, o[0]], o, LEVEL3)!;
+    expect(r.score).toBe(100);
+    expect(r.size).toBeCloseTo(1, 2);
+    expect(sizeLabel(r.size)).toBe('rovnaká ako tvar');
   });
 
   it('nezávisí od rýchlosti ruky: pauza na mieste nezmení presnosť (predtým sa vážilo časom)', () => {
@@ -56,7 +58,7 @@ describe('presnosť', () => {
   });
 
   it('väčšia odchýlka = nižšie skóre', () => {
-    const scores = [1, 0.9, 0.8, 0.7].map((rad) => evaluate(arc(rad), circle, LEVEL1, 'hard')!.score);
+    const scores = [1, 0.9, 0.8, 0.7].map((rad) => evaluate(arc(rad), circle, LEVEL1)!.score);
     for (let i = 1; i < scores.length; i++) expect(scores[i]).toBeLessThan(scores[i - 1]);
   });
 
@@ -67,32 +69,31 @@ describe('presnosť', () => {
   });
 });
 
-describe('režimy hodnotenia', () => {
-  const tremor = arc(1, 0, 1, 600, 0.08);
-  const small = arc(0.85);
-
-  it('zvyčajné: bežné chvenie ruky neznižuje skóre, prísne áno', () => {
-    expect(evaluate(tremor, circle, LEVEL3, 'normal')!.score).toBe(100);
-    expect(evaluate(tremor, circle, LEVEL3, 'hard')!.score).toBeLessThan(95);
+describe('skóre nie je vždy 100', () => {
+  it('chvenie ruky a mierne posunutá čiara skóre znižujú', () => {
+    expect(evaluate(arc(1, 0, 1, 600, 0.08), circle, LEVEL3)!.score).toBeLessThan(95);
+    expect(evaluate(arc(1.03), circle, LEVEL3)!.score).toBeLessThan(95);
+    expect(evaluate(arc(1.03), circle, LEVEL3)!.score).toBeGreaterThan(85);
   });
 
-  it('zvyčajné nikdy nedá menej ako prísne', () => {
-    for (const tr of [tremor, small, arc(1, 0, 0.7), arc(1.1, 0, 1, 600, 0.2)]) {
-      for (const ts of [LEVEL3, LEVEL1]) {
-        expect(evaluate(tr, circle, ts, 'normal')!.score).toBeGreaterThanOrEqual(evaluate(tr, circle, ts, 'hard')!.score);
-      }
-    }
+  it('kruh o 15 % menší má okolo 57 bodov (veľký tvar)', () => {
+    const s = evaluate(arc(0.85), circle, LEVEL3)!.score;
+    expect(s).toBeGreaterThanOrEqual(52);
+    expect(s).toBeLessThanOrEqual(62);
   });
 
-  it('kruh o 15 % menší: zvyčajné okolo 83, prísne okolo 57 (veľký tvar)', () => {
-    expect(evaluate(small, circle, LEVEL3, 'normal')!.score).toBeGreaterThanOrEqual(78);
-    expect(evaluate(small, circle, LEVEL3, 'hard')!.score).toBeLessThanOrEqual(62);
+  it('medzera v obryse skóre znižuje úmerne pokrytiu', () => {
+    const r = evaluate(arc(1, 0, 0.8), circle, LEVEL3)!;
+    expect(r.score).toBe(Math.round(100 * r.coverage));
+    expect(r.score).toBeLessThan(90);
   });
+});
 
-  it('nastavenia režimov dávajú zmysel', () => {
-    expect(SCORING.normal.free).toBeGreaterThan(SCORING.hard.free);
-    expect(SCORING.normal.tol).toBeGreaterThan(SCORING.hard.tol);
-    for (const m of [SCORING.normal, SCORING.hard]) { expect(m.tol).toBeGreaterThan(m.free); expect(m.fullCov).toBeGreaterThanOrEqual(DRAW_COMPLETE_COVERAGE); }
+describe('veľkosť kresby', () => {
+  it('meria sa voči samotnému tvaru, nie voči pevnej jednotke', () => {
+    expect(evaluate(arc(1.03), circle, LEVEL3)!.size).toBeCloseTo(1.03, 2);
+    expect(sizeLabel(1.03)).toBe('o 3 % väčšia než tvar');
+    expect(sizeLabel(evaluate(arc(0.85), circle, LEVEL3)!.size)).toBe('o 15 % menšia než tvar');
   });
 });
 
@@ -103,5 +104,15 @@ describe('pokrok používateľa', () => {
     expect(p.drawing.count).toBe(2);
     expect(p.drawing.best).toBe(80);
     expect(p.drawing.days[0].value).toBe(70);
+  });
+
+  it('záznamy zo zhovievavého hodnotenia (takmer vždy 100) sa do štatistík nepočítajú', () => {
+    const p = summarize([
+      { t: 1, kind: 'drawing', shape: 'circle', level: 3, score: 72, accuracy: 0.8, coverage: 0.9 },
+      { t: 2, kind: 'drawing', shape: 'circle', level: 3, score: 100, accuracy: 1, coverage: 0.95, scoring: 'normal' },
+      { t: 3, kind: 'drawing', shape: 'circle', level: 3, score: 64, accuracy: 0.7, coverage: 0.92, scoring: 'hard' },
+    ]);
+    expect(p.drawing.count).toBe(2);
+    expect(p.drawing.best).toBe(72);
   });
 });

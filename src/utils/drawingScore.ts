@@ -8,16 +8,7 @@ export const REF_SCALE = 0.32;         // veľkosť, pre ktorú sú nastavené t
 export const MIN_STROKE_POINTS = 20;
 export const MIN_STROKE_LEN = 0.3;     // kratší ťah (v jednotkách tvaru pri REF_SCALE, ~6 % obvodu kruhu) je len bodka/náhodný stisk: nehodnotí sa vôbec
 export const COVER_TOL = 0.18;         // tolerancia pokrytia obrysu (v jednotkách tvaru)
-// Režim hodnotenia (v jednotkách tvaru pri REF_SCALE):
-//  free     = priemerná odchýlka, ktorá sa ešte neráta (bežné chvenie ruky nezníži presnosť)
-//  tol      = priemerná odchýlka, pri ktorej je presnosť 0 %
-//  fullCov  = pokrytie obrysu, od ktorého sa už skóre neznižuje (malá medzera na konci ťahu nevadí)
-// 'normal' je zhovievavý (predvolený, pre hráča s tremorom), 'hard' je pôvodné prísne hodnotenie.
-export type ScoringMode = 'normal' | 'hard';
-export const SCORING: Record<ScoringMode, { label: string; free: number; tol: number; fullCov: number }> = {
-  normal: { label: 'Zvyčajné', free: 0.06, tol: 0.6, fullCov: 0.9 },
-  hard: { label: 'Prísne', free: 0, tol: 0.35, fullCov: 1 },
-};
+export const ACC_TOL = 0.35;          // priemerná odchýlka čiary od obrysu (v jednotkách tvaru pri REF_SCALE), pri ktorej je presnosť 0 %
 
 /** Obrys tvaru v súradniciach -1..1, hustý zatvorený polygón. */
 export function outline(key: ShapeKey): Pt[] {
@@ -47,9 +38,16 @@ export type Result = {
   score: number;
   accuracy: number;
   coverage: number;
-  range: number;
+  size: number;       // veľkosť kresby voči tvaru: 1 = rovnako veľká, 1.03 = o 3 % väčšia, 0.9 = o 10 % menšia
   deviation: number;  // priemerná odchýlka čiary od obrysu v jednotkách tvaru
 };
+
+/** Šírka a výška bodov (ohraničujúci obdĺžnik). */
+function extent(pts: Pt[]): [number, number] {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const [x, y] of pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+  return [maxX - minX, maxY - minY];
+}
 
 /** Vzdialenosť bodu od zatvoreného obrysu (od úsečiek medzi jeho bodmi, nie len od bodov). */
 export function distToOutline(p: Pt, shape: Pt[]): number {
@@ -69,13 +67,15 @@ export function distToOutline(p: Pt, shape: Pt[]): number {
  * Hodnotenie ťahu. null = ťah je príliš krátky na to, aby bol pokusom o tvar (bodka, náhodný stisk).
  * tolScale: tolerancie sú v jednotkách tvaru; pri menšom tvare sa zväčšia, aby zodpovedali rovnakej odchýlke v pixeloch.
  *
+ * Skóre = presnosť × pokrytie (pôvodný vzorec). Zhovievavý režim, v ktorom sa malá odchýlka nerátala, dával takmer vždy 100,
+ * takže medzi pokusmi nebolo vidieť rozdiel; preto je zrušený a každá odchýlka od obrysu skóre znižuje.
  * - pokrytie: podiel obrysu, ktorý má ťah vo svojej blízkosti (COVER_TOL). Pod DRAW_COMPLETE_COVERAGE tvar nie je dokončený.
- * - presnosť: priemerná odchýlka čiary od obrysu VÁŽENÁ DĹŽKOU ČIARY. Vzorky chodia 125×/s, takže obyčajný priemer cez body
- *   vážil časom: státie na mieste (pauza, pomalý úsek) presnosť umelo zvyšovalo alebo znižovalo, hoci čiara bola rovnaká.
- *   Teraz má každý kúsok nakreslenej čiary rovnakú váhu bez ohľadu na rýchlosť ruky. Prísnosť určuje režim (SCORING).
+ * - presnosť: 1 - priemerná odchýlka / ACC_TOL. Odchýlka je VÁŽENÁ DĹŽKOU ČIARY: vzorky chodia 125×/s, takže obyčajný priemer
+ *   cez body vážil časom a státie na mieste (pauza, pomalý úsek) presnosť menilo, hoci čiara bola rovnaká.
+ * - veľkosť: šírka a výška kresby voči šírke a výške SAMOTNÉHO TVARU (priemer oboch osí). Predtým sa väčší rozmer delil
+ *   pevnou hodnotou 1, takže presne obkreslený štvorec mal "80 %" a kruh nakreslený tesne zvonka "103 %" bez vysvetlenia.
  */
-export function evaluate(trail: Pt[], shape: Pt[], tolScale = 1, mode: ScoringMode = 'normal'): Result | null {
-  const sc = SCORING[mode];
+export function evaluate(trail: Pt[], shape: Pt[], tolScale = 1): Result | null {
   const dist = trail.map((p) => distToOutline(p, shape));
   let len = 0, weighted = 0;
   for (let i = 1; i < trail.length; i++) {
@@ -93,10 +93,15 @@ export function evaluate(trail: Pt[], shape: Pt[], tolScale = 1, mode: ScoringMo
     }
   }
   const coverage = covered / shape.length;
-  const accuracy = Math.max(0, Math.min(1, 1 - (deviation - sc.free * tolScale) / ((sc.tol - sc.free) * tolScale)));
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const [x, y] of trail) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
-  const range = Math.max(maxX - minX, maxY - minY) / 2;
+  const accuracy = Math.max(0, 1 - deviation / (ACC_TOL * tolScale));
+  const [tw, th] = extent(trail), [sw, sh] = extent(shape);
+  const size = (tw / sw + th / sh) / 2;
   const complete = coverage >= DRAW_COMPLETE_COVERAGE;
-  return { complete, score: complete ? Math.round(100 * accuracy * Math.min(1, coverage / sc.fullCov)) : 0, accuracy, coverage, range, deviation };
+  return { complete, score: complete ? Math.round(100 * accuracy * coverage) : 0, accuracy, coverage, size, deviation };
+}
+
+/** Veľkosť kresby slovom, napr. "o 3 % väčšia než tvar". */
+export function sizeLabel(size: number): string {
+  const d = Math.round((size - 1) * 100);
+  return d === 0 ? 'rovnaká ako tvar' : `o ${Math.abs(d)} % ${d > 0 ? 'väčšia' : 'menšia'} než tvar`;
 }
