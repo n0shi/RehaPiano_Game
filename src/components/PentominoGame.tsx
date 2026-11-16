@@ -68,14 +68,10 @@ const CALIB_SHOW_MS = 500;    // priebeh sa ukazuje až po tomto čase (krátky 
 const GRIP_FREEZE_MS = GRIP_RECENTER_MS + 60; // od začiatku stisku do vynulovania (s rezervou, aby vynulovanie padlo ešte do zmrazenia)
 const RELEASE_FREEZE_MS = 350;   // po uvoľnení: prsty sa otvárajú postupne (stisk končí už prvým uvoľneným prstom)
 const RELEASE_LOOKBACK_MS = 80;  // poloha pred uvoľnením: naklonenie začína ešte pred tým, ako prst klesne pod prah
-// Zámok osi kurzora (ako zámok osi bloku v pieceManip): pri zjavne vodorovnom/zvislom pohybe sa bočná zložka zahodí.
-// Prečo: náklon ruky má bočnú zložku (natočenie senzora a oblúk zápästia nesedia u každého presne – na záznamoch 10–35 %).
-// Bloky sa hýbu po bunkách, preto tu zámok ostáva (kreslenie ho nemá: kruh a šikmé čiary).
-const AXIS_LOCK_MIN = 0.06;      // posun (rozsah -1..1, ~0,6 bunky) v hlavnej osi, od ktorého sa zámok zvažuje
-const AXIS_LOCK_RATIO = 1.8;     // hlavná os ≥ 1,8× bočná (odklon do ~29°) = pohyb po osi
-const AXIS_UNLOCK_RATIO = 0.8;   // bočná os ≥ 0,8× hlavnej (~39°) = zámerne šikmý pohyb, zámok sa uvoľní
-const STROKE_STILL_SPEED = 0.15; // rýchlosť (rozsah/s), pod ktorou ruka "stojí"
-const STROKE_END_MS = 150;       // po takejto pauze sa pohyb považuje za skončený a ďalší sa vyhodnocuje odznova
+// Blok ide za rukou plynulo (desatinné bunky) a na mriežku sa prichytí až po pustení. Ťahanie po bunkách (PIECE_STEP_MOVE = true)
+// blok počas držania "priťahovalo" k bunkám a spolu so zámkom osi kurzora brzdilo šikmý pohyb (hore a do strany): bočná zložka
+// sa zahadzovala, kým nedosiahla 70–80 % hlavnej, takže blok chvíľami stál. Zámok osi kurzora je preto zrušený.
+const PIECE_STEP_MOVE = false;
 // Farby hracieho poľa
 const BOARD_FRAME = '#e2e8f0';      // okraj okolo mriežky
 const BOARD_CELL = '#f1f5f9';       // bunky mimo cieľa
@@ -236,8 +232,6 @@ export function PentominoGame({
   const [calibProg, setCalibProg] = useState(0);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const prevGripRef = useRef(false);
-  const strokeRef = useRef<{ prev: { x: number; y: number } | null; seq: number; sx: number; sy: number; lock: 'x' | 'y' | null; stillMs: number }>(
-    { prev: null, seq: -1, sx: 0, sy: 0, lock: null, stillMs: 0 });
   const freezeRef = useRef<{ pos: { x: number; y: number } | null; until: number; release: boolean }>({ pos: null, until: 0, release: false });
   const posHistRef = useRef<{ t: number; x: number; y: number }[]>([]);
   const handRolledRef = useRef<boolean>(false);
@@ -442,7 +436,7 @@ export function PentominoGame({
         if (grabbed !== grabbedRef.current) { grabbedRef.current = grabbed; setIsGripping(grabbed); }
       },
       playing: () => playableRef.current,
-      stepMove: true, // pôvodné ťahanie po bunkách (nie plynulé); otáčanie, prevrat a prichytenie ostávajú nové
+      stepMove: PIECE_STEP_MOVE,
     });
     manipRef.current = manip;
     inputRef.current = new CursorGripInput(manip, cfg as any);
@@ -572,33 +566,6 @@ export function PentominoGame({
         const rawPos = HAND_SPEED_GAIN ? speedGainRef.current.apply(rawLin, dt, speedGainSeqRef.current !== seqNow) : rawLin;
         speedGainSeqRef.current = seqNow;
         const anchor = anchorRef.current;
-        // Zámok osi kurzora (pozri AXIS_LOCK_*): bočná zložka pohybu sa pri pohybe po osi odpočíta cez kotvu.
-        {
-          const st = strokeRef.current;
-          const seq = imuCtrlRef.current!.recenterSeq;
-          const frozenNow = !!freezeRef.current.pos || grip !== prevGripRef.current;
-          if (!st.prev || st.seq !== seq || frozenNow) {
-            // po vynulovaní náklonu (skok surovej polohy) a počas zmrazenia sa nemeria; nový pohyb od nuly
-            st.sx = 0; st.sy = 0; st.lock = null; st.stillMs = 0;
-          } else {
-            const dx = rawPos.x - st.prev.x, dy = rawPos.y - st.prev.y;
-            if (Math.hypot(dx, dy) / dt < STROKE_STILL_SPEED) {
-              st.stillMs += dt * 1000;
-              if (st.stillMs > STROKE_END_MS) { st.sx = 0; st.sy = 0; st.lock = null; }
-            } else st.stillMs = 0;
-            st.sx += dx; st.sy += dy;
-            const ax = Math.abs(st.sx), ay = Math.abs(st.sy);
-            if (st.lock === 'x' && ay > AXIS_UNLOCK_RATIO * ax) st.lock = null;
-            else if (st.lock === 'y' && ax > AXIS_UNLOCK_RATIO * ay) st.lock = null;
-            if (!st.lock) {
-              if (ax >= AXIS_LOCK_MIN && ax > AXIS_LOCK_RATIO * ay) st.lock = 'x';
-              else if (ay >= AXIS_LOCK_MIN && ay > AXIS_LOCK_RATIO * ax) st.lock = 'y';
-            }
-            if (st.lock === 'x') anchor.y -= dy;
-            else if (st.lock === 'y') anchor.x -= dx;
-          }
-          st.prev = { ...rawPos }; st.seq = seq;
-        }
         // Zmrazenie kurzora pri prechode stisk <-> uvoľnenie (pozri GRIP_FREEZE_MS / RELEASE_FREEZE_MS): kotva sa dorovná tak,
         // aby poloha ostala stáť; po skončení kurzor pokračuje plynulo od tohto miesta.
         const tPos = performance.now();

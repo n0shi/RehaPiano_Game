@@ -277,8 +277,12 @@ export class PieceManipulator implements CursorActions {
     if (this.frame === null) this.frame = this.scheduler.request((t) => this.tick(t));
   }
 
-  /** Zobrazená poloha dobieha logickú (po pustení a v režime krokov – posun medzi bunkami je plynulý). */
-  private smoothed(s: Session) { return s.snapping || (s.grabbed && !!this.host.stepMove); }
+  /**
+   * Zobrazená poloha dobieha logickú: po pustení (dosadnutie na bunku), v režime krokov (posun medzi bunkami) a pri plynulom
+   * ťahaní po potvrdení otočenia (stred bloku sa vtedy posunie o pol bunky). Samotný pohyb ruky sa pri plynulom ťahaní
+   * prenáša na zobrazenú polohu hneď (move), bez oneskorenia.
+   */
+  private smoothed(s: Session) { return s.snapping || s.grabbed; }
 
   private animating() {
     const s = this.session;
@@ -289,8 +293,8 @@ export class PieceManipulator implements CursorActions {
 
   private computeGhost(s: Session): LiveView['ghost'] {
     const steps = Math.round(this.rotationAngle / STEP_DEG);
-    // režim krokov: rovnaká os otáčania ako pri potvrdení (settleRotation), náhľad teda sedí s miestom dosadnutia
-    const rot = this.host.stepMove ? rotateAboutPivot(s.grid, s.cx, s.cy, steps) : { grid: rotateSteps(s.grid, steps), cx: s.cx, cy: s.cy };
+    // rovnaká os otáčania ako pri potvrdení (settleRotation), náhľad teda sedí s miestom dosadnutia
+    const rot = rotateAboutPivot(s.grid, s.cx, s.cy, steps);
     const g = rot.grid;
     const h = g.length, w = g[0]?.length ?? 0;
     const r0 = Math.round(rot.cy - h / 2), c0 = Math.round(rot.cx - w / 2);
@@ -420,9 +424,19 @@ export class PieceManipulator implements CursorActions {
     const s = this.session;
     if (!s || !s.grabbed || !this.startPosition) return;
     if (this.host.stepMove) { this.stepTo(s, position); return; }
-    s.cx = this.startCx + (position.x - this.startPosition.x) * (this.host.cols() / 2);
-    s.cy = this.startCy + (position.y - this.startPosition.y) * (this.host.rows() / 2);
+    // Plynulé ťahanie: blok ide za rukou 1:1 v oboch osiach naraz (bez krokov po bunkách a bez zámku osi), na bunku dosadne až po pustení.
+    const kx = this.host.cols() / 2, ky = this.host.rows() / 2;
+    const px = s.cx, py = s.cy;
+    const wantX = this.startCx + (position.x - this.startPosition.x) * kx;
+    const wantY = this.startCy + (position.y - this.startPosition.y) * ky;
+    s.cx = wantX; s.cy = wantY;
     this.clamp();
+    // Okraj poľa: čo ruka "pretlačí" za stenu, sa zahodí, takže po obrátení smeru sa blok pohne hneď
+    if (s.cx !== wantX || s.cy !== wantY) {
+      this.startPosition = { x: this.startPosition.x + (wantX - s.cx) / kx, y: this.startPosition.y + (wantY - s.cy) / ky };
+    }
+    s.shownX += s.cx - px; s.shownY += s.cy - py;
+    if (!s.moveStarted && Math.hypot(s.cx - this.startCx, s.cy - this.startCy) >= MOVE_START_CELLS) s.moveStarted = true;
     this.invalidate();
   }
 
@@ -549,11 +563,9 @@ export class PieceManipulator implements CursorActions {
     if (!s || s.snapping) return;
     const steps = Math.round(this.rotationAngle / STEP_DEG);
     if (steps !== 0) {
-      if (this.host.stepMove) {
-        // otočenie okolo bunky bloku (pivotOffset): ľavý horný roh ostáva na celých bunkách a blok sa otáčaním neposúva
-        const rot = rotateAboutPivot(s.grid, s.cx, s.cy, steps);
-        s.grid = rot.grid; s.cx = rot.cx; s.cy = rot.cy;
-      } else s.grid = rotateSteps(s.grid, steps);
+      // otočenie okolo bunky bloku (pivotOffset): ľavý horný roh ostáva na celých bunkách a blok sa otáčaním neposúva
+      const rot = rotateAboutPivot(s.grid, s.cx, s.cy, steps);
+      s.grid = rot.grid; s.cx = rot.cx; s.cy = rot.cy;
       s.dirty = true;
     }
     // Zachová sa rovnaká viditeľná poloha: potvrdená geometria + zostatok uhla.

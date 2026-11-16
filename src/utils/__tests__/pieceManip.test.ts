@@ -6,7 +6,7 @@ import type { PlacedPiece } from '../pentominoUtils';
 
 const ROWS = 20, COLS = 20;
 
-function setup(pieces: PlacedPiece[]) {
+function setup(pieces: PlacedPiece[], stepMove = true) {
   let t = 0;
   let queue: ((time: number) => void)[] = [];
   let selected: string | null = null;
@@ -21,7 +21,7 @@ function setup(pieces: PlacedPiece[]) {
       commits.push({ uid: info.uid, changed: info.changed });
     },
     render: (s) => { snap = s; },
-    stepMove: true,
+    stepMove,
   }, { request: (cb) => { queue.push(cb); return queue.length; }, cancel: () => { queue = []; }, now: () => t });
   /** Posunie hodiny o `ms` po snímkach 16 ms. */
   const run = (ms: number) => { const end = t + ms; while (t < end) { t += 16; const q = queue; queue = []; q.forEach((f) => f(t)); } };
@@ -170,5 +170,71 @@ describe('ťahanie bloku rukou', () => {
       h.run(800);
       expect(pieces[0].grid).toEqual(expected ? flipPentomino(shape(id)) : shape(id));
     }
+  });
+});
+
+describe('plynulé ťahanie (bez priťahovania k bunkám počas držania)', () => {
+  const center = (h: ReturnType<typeof setup>) => { const s = (h.manip as any).session; return { x: s.cx, y: s.cy }; };
+
+  it('blok ide za rukou po desatinách bunky, na bunku dosadne až po pustení', () => {
+    const pieces = [piece('a', 'X', 8, 8)];
+    const h = setup(pieces, false);
+    h.manip.begin(at(9.5, 9.5));
+    h.manip.move(at(9.8, 9.5)); h.run(16);
+    expect(center(h).x).toBeCloseTo(9.8, 5);           // 0,3 bunky: v režime krokov by blok stál
+    expect(h.snap().live!.cx).toBeCloseTo(9.8, 5);     // zobrazená poloha bez oneskorenia
+    h.manip.move(at(11.9, 9.5)); h.run(16);
+    h.manip.finish(); h.run(500);
+    expect({ row: pieces[0].row, col: pieces[0].col }).toEqual({ row: 8, col: 10 });
+  });
+
+  it('šikmo hore a do strany: blok sa hýbe v oboch osiach naraz pri každom sklone pohybu', () => {
+    for (const slope of [0.2, 0.4, 0.6, 0.8, 1, 1.5, 3]) {
+      for (const side of [1, -1]) {
+        const pieces = [piece('a', 'X', 10, 9)];
+        const h = setup(pieces, false);
+        h.manip.begin(at(10.5, 11.5));
+        let prev = center(h);
+        for (let i = 1; i <= 100; i++) {
+          const d = i * 0.05; // 5 buniek do strany, slope × toľko hore
+          h.manip.move(at(10.5 + side * d, 11.5 - Math.min(8, slope * d))); h.run(16);
+          const c = center(h);
+          if (slope * d < 8) {
+            expect(Math.abs(c.x - prev.x)).toBeCloseTo(0.05, 5);        // každá vzorka pohne blokom do strany
+            expect(prev.y - c.y).toBeCloseTo(0.05 * slope, 5);          // aj hore, bez zámku osi a bez čakania
+          }
+          prev = c;
+        }
+        h.manip.finish(); h.run(500);
+        expect(pieces[0].col).toBe(9 + side * 5);
+        expect(pieces[0].row).toBe(Math.round(10 - Math.min(8, slope * 5)));
+      }
+    }
+  });
+
+  it('pri okraji poľa sa posun ruky nehromadí: po obrátení smeru sa blok pohne hneď', () => {
+    const pieces = [piece('a', 'I', 8, 10)];
+    const h = setup(pieces, false);
+    h.manip.begin(at(10.5, 10.5));
+    let hand = 10.5;
+    for (let i = 0; i < 600; i++) { hand += 0.05; h.manip.move(at(hand, 10.5)); h.run(16); }
+    const atWall = center(h).x;
+    expect(atWall).toBe(COLS - pieces[0].grid[0].length / 2);
+    h.manip.move(at(hand - 0.5, 10.5)); h.run(16);
+    expect(center(h).x).toBeCloseTo(atWall - 0.5, 5);
+  });
+
+  it.each(variants)('otáčanie zápästím blok $name neposúva (4× 90° = pôvodné miesto)', ({ id, grid }) => {
+    const pieces = [piece('a', id, 8, 8, grid)];
+    const before = state(pieces[0]);
+    const h = setup(pieces, false);
+    for (let k = 0; k < 4; k++) {
+      const [r, c] = cellsOf(pieces[0])[0].split(',').map(Number); // stisk nad bunkou bloku
+      expect(h.manip.begin(at(c + 0.5, r + 0.5))).toBe(true);
+      h.manip.rotate(90); h.run(100);
+      h.manip.settleRotation(); h.run(600);
+      h.manip.finish(); h.run(500);
+    }
+    expect(state(pieces[0])).toBe(before);
   });
 });
