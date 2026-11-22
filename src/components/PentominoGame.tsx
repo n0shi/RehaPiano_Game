@@ -238,6 +238,7 @@ export function PentominoGame({
   const [isGripping, setIsGripping] = useState<boolean>(false); // State pre IMU grip - použité v kontrole výhry
   const startTimeRef = useRef<number>(Date.now());
   const levelStartRef = useRef<number>(Date.now());
+  const levelSecondsRef = useRef<number | null>(null); // trvanie levelu v okamihu dokončenia (bez prestávky "Oddýchnite si")
   const [levelDurations, setLevelDurations] = useState<number[]>([]);
   const [longestLevelIndex, setLongestLevelIndex] = useState<number | null>(null);
   const [longestLevelTime, setLongestLevelTime] = useState<number | null>(null);
@@ -269,14 +270,7 @@ export function PentominoGame({
   const GRID_WIDTH = 20;
   const GRID_HEIGHT = 20;
 
-  // Ak config nie je načítaný, zobraz loading
-  if (!cfg) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center">
-        <div className="text-2xl text-slate-600">Načítavam konfiguráciu...</div>
-      </div>
-    );
-  }
+  // (useConfig konfiguráciu vždy má – bez nej vyhodí chybu –, preto tu nie je predčasný return pred hookmi nižšie)
 
   // Inicializácia levelu
   useEffect(() => {
@@ -734,6 +728,7 @@ export function PentominoGame({
 
     if (isLevelComplete(grid, currentLevel.targetShape)) {
       wonKeyRef.current = levelKey;
+      levelSecondsRef.current = Math.floor((Date.now() - levelStartRef.current) / 1000);
       setShowRestPopup(true);
     }
   }, [grid, currentLevel, placedPieces, isGripping, draggingPiece, levelKey, showFinishedModal]);
@@ -741,8 +736,9 @@ export function PentominoGame({
   // Po oddychu: zaznamenaj výsledok levelu a prejdi na ďalší (alebo ukáž štatistiky po poslednom)
   finishLevelRef.current = () => {
     setShowRestPopup(false);
-    // Zaznamenaj trvanie tohto dokončeného levelu
-    const duration = Math.floor((Date.now() - levelStartRef.current) / 1000);
+    // Zaznamenaj trvanie tohto dokončeného levelu (po posledný ťah; prestávka COFFEE_BREAK sa nepočíta)
+    const duration = levelSecondsRef.current ?? Math.floor((Date.now() - levelStartRef.current) / 1000);
+    levelSecondsRef.current = null;
     addResult({ t: Date.now(), kind: 'pentomino', level: currentLevelIndex + 1, seconds: duration }); // pokrok používateľa
     setLevelDurations((prev) => {
       const newArr = [...prev, duration];
@@ -780,14 +776,13 @@ export function PentominoGame({
   }, [showRestPopup]);
 
   const handleRestart = () => {
-    // Znovu načítaj aktuálny level zvýšením reloadKey, čo spustí inicializačný effect
+    // Znovu načítaj aktuálny level zvýšením reloadKey, čo spustí inicializačný effect (ten nastaví aj čas začiatku levelu;
+    // na prvom leveli vynuluje celé štatistiky). Celkový čas a ťahy relácie sa tu nenulujú: predtým sa po reštarte napr. 5. levelu
+    // celkový čas počítal len od reštartu, kým "Najdlhší level" obsahoval aj predchádzajúce levely.
     setReloadKey((k) => k + 1);
     setShowRestPopup(false);
-    // Resetuj štatistiky pre tento level
-    setMovesCount(0);
-    setTimeTaken(0);
+    levelSecondsRef.current = null;
     setHistoryStack([]); // Vyčisti históriu pri reštarte
-    startTimeRef.current = Date.now();
   };
 
   // Uloží aktuálny stav do histórie pred zmenou
@@ -900,7 +895,8 @@ export function PentominoGame({
           draggingPiece.shape.color
         );
 
-        const uid = genUid();
+        // blok si ponechá svoje uid (štatistika "Položené bloky" ho inak pri každom presune myšou rátala ako nový)
+        const uid = draggingPiece.originalUid ?? genUid();
         const newPiece: PlacedPiece = {
           shapeId: draggingPiece.shape.id,
           grid: draggingPiece.grid,
@@ -976,7 +972,7 @@ export function PentominoGame({
             draggingPiece.shape.color
           );
 
-          const uid = genUid();
+          const uid = draggingPiece.originalUid ?? genUid();
           const newPiece: PlacedPiece = {
             shapeId: draggingPiece.shape.id,
             grid: draggingPiece.grid,
@@ -991,7 +987,8 @@ export function PentominoGame({
             const newArr = [...prev, newPiece];
             setActivePieceId(uid);
             setMovesCount((m) => m + 1);
-            // Umiestnenie MIMO targetShape sa nepočíta (dočasná pozícia)
+            // Umiestnenie MIMO targetShape sa nepočíta (dočasná pozícia); blok vytiahnutý z cieľa sa prestane počítať
+            levelUserPlacedRef.current.delete(uid);
             return newArr;
           });
           setOriginalPosition(null);
@@ -1005,7 +1002,7 @@ export function PentominoGame({
             draggingPiece.shape.color
           );
 
-          const uid = genUid();
+          const uid = draggingPiece.originalUid ?? genUid();
           const restoredPiece: PlacedPiece = {
             shapeId: draggingPiece.shape.id,
             grid: draggingPiece.grid,

@@ -673,6 +673,9 @@ export function GameBoard({
   useEffect(() => {
     if (!imuCtrlRef.current) {
       imuCtrlRef.current = new SingleIMUController();
+      // Streamer posiela gyro už v °/s (ako v Pentomine, menu a kreslení). S predvoleným deliteľom 16 bol prah otočenia
+      // 50 °/s v skutočnosti ~800 °/s a blok sa rukavicou nedal otočiť vôbec.
+      imuCtrlRef.current.gyroDivisor = 1;
       // Nastavenie grid size podľa konfigurácie (use GRID_WIDTH to reduce lateral sensitivity)
       imuCtrlRef.current.gridSize = cfg.GRID_WIDTH;
       // Tuning to reduce perceived movement speed / make smoothing stronger
@@ -817,27 +820,21 @@ export function GameBoard({
         const GYRO_ROTATION_THRESHOLD = 50; // deg/s
         const GYRO_ROTATION_COOLDOWN_MS = 300; // ms
         
-        if (grab && currentBlockRef.current) {
+        // Jedno otočenie zápästia = jedno otočenie bloku: ďalšie až keď gyro na chvíľu klesne (gyroZWasReleased),
+        // inak by dlhšie otáčanie pri skutočných °/s otočilo blok viackrát za sebou.
+        if (grab && currentBlockRef.current && out.gyroZWasReleased) {
           if (now - lastRotationTimeRef.current >= GYRO_ROTATION_COOLDOWN_MS) {
             const gyro = out.gyro || { x: 0, y: 0, z: 0 };
-            
-            if (gyro.z > GYRO_ROTATION_THRESHOLD) {
-              const rotated = rotateBlock(currentBlockRef.current, true);
+            const dir = gyro.z > GYRO_ROTATION_THRESHOLD ? true : gyro.z < -GYRO_ROTATION_THRESHOLD ? false : null;
+            if (dir !== null) {
+              const rotated = rotateBlock(currentBlockRef.current, dir);
               if (
                 isBlockInBounds(rotated) &&
                 (passThroughRef.current || !placedBlocksRef.current.some((p) => blocksCollide(rotated, p)))
               ) {
                 setCurrentBlock(rotated);
                 lastRotationTimeRef.current = now;
-              }
-            } else if (gyro.z < -GYRO_ROTATION_THRESHOLD) {
-              const rotated = rotateBlock(currentBlockRef.current, false);
-              if (
-                isBlockInBounds(rotated) &&
-                (passThroughRef.current || !placedBlocksRef.current.some((p) => blocksCollide(rotated, p)))
-              ) {
-                setCurrentBlock(rotated);
-                lastRotationTimeRef.current = now;
+                imuCtrlRef.current?.consumeGyroZ();
               }
             }
           }

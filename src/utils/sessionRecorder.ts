@@ -39,8 +39,12 @@ export class SessionRecorder {
   private lastT = 0;
   private lastActive = 0;
   private budget = Infinity;
+  // Zatvorenie karty / obnovenie stránky nespustí odmontovanie Reactu (stop()): bez tohto sa stratil rozpracovaný blok
+  // (až ~10 s) a hlavička ostala "neukončená" so sampleCount 0, takže sa záznam nerátal ani do stropu úložiska.
+  private onPageHide = () => this.checkpoint();
 
   constructor(userId: string, kind: RecordingHeader['kind'], meta: Record<string, unknown>) {
+    if (typeof window !== 'undefined') window.addEventListener('pagehide', this.onPageHide);
     this.recId = userSampleCount(userId)
       .then((used) => {
         this.budget = MAX_USER_SAMPLES - used;
@@ -80,9 +84,23 @@ export class SessionRecorder {
     void this.recId.then((id) => (id >= 0 ? putChunk(id, idx, COLS, data) : undefined)).catch((e) => console.warn('Záznam dát: zápis zlyhal', e));
   }
 
+  /**
+   * Zapíše rozpracovaný blok a priebežnú hlavičku, záznam však beží ďalej (stránka sa môže vrátiť z bfcache; vtedy ho neskôr
+   * ukončí stop()). Krátky záznam sa tu nemaže – o tom rozhodne až stop().
+   */
+  checkpoint() {
+    if (this.stopped) return;
+    this.flush();
+    const patch = { endedAt: Date.now(), sampleCount: this.count, events: [...this.events] };
+    void this.recId
+      .then((id) => (id >= 0 && this.count > 0 ? finishRecording(id, patch) : undefined))
+      .catch((e) => console.warn('Záznam dát: priebežné uloženie zlyhalo', e));
+  }
+
   async stop() {
     if (this.stopped) return;
     this.stopped = true;
+    if (typeof window !== 'undefined') window.removeEventListener('pagehide', this.onPageHide);
     this.flush();
     try {
       const id = await this.recId;

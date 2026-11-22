@@ -142,6 +142,13 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
   const { isCalibrated, neutralQuat, requestCalibration } = useCalibration();
   const [imuDebug, setImuDebug] = useState<any>({});
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  // Hlavný effect hry beží raz na hru: hodnoty, ktoré sa menia počas hry, číta cez refy. Predtým boli v uzávere zachytené
+  // pri štarte (wsConnected vždy false -> hra sa počas kalibrácie nezmrazila) a onBackToMenu bol v závislostiach – je to nová
+  // funkcia pri každom prekreslení App, takže každá zmena kalibrácie (Rekalibrovať, dokončenie kalibrácie) hru reštartovala.
+  const onBackToMenuRef = useRef(onBackToMenu);
+  onBackToMenuRef.current = onBackToMenu;
+  const calibFrozenRef = useRef(false); // rukavica pripojená, ale ešte nekalibrovaná -> herný vstup stojí
+  calibFrozenRef.current = !isCalibrated && wsConnected;
   // === VIZUÁLNA INDIKÁCIA STISKU (GRIP) ===
   const [isGripping, setIsGripping] = useState<boolean>(false);
 
@@ -343,7 +350,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
 
         // Ak neboli umiestnené žiadne kúsky, vrátiť sa do menu
         if (g.tetris.placedCount === 0) {
-          onBackToMenu();
+          onBackToMenuRef.current();
           return;
         }
         
@@ -364,7 +371,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       // Ak je otvorený akýkoľvek modal, zablokovať herný vstup
       if ((window as any).__modalOpen) return;
       // Ak prebieha kalibrácia a WS je pripojený, zmraziť vstupy
-      if (!isCalibrated && wsConnected) return;
+      if (calibFrozenRef.current) return;
 
       // F1 - prepnutie nastavení
       if (e.key === 'F1') {
@@ -381,7 +388,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       const key = e.key.toLowerCase();
 
       if (key === 'escape') {
-        onBackToMenu();
+        onBackToMenuRef.current();
         return;
       }
 
@@ -439,7 +446,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       // Ak je otvorený modal, ignorovať IMU vzorky pre hernú logiku
       if ((window as any).__modalOpen) return;
       // Zmraziť IMU-riadenú logiku kým nie je dokončená kalibrácia (len ak je WS pripojené)
-      if (!isCalibrated && wsConnected) return;
+      if (calibFrozenRef.current) return;
       const g = gameRef.current;
       if (!g) return;
 
@@ -498,11 +505,6 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       // Namapovať pozíciu na gride podľa vybratej ruky (1:1 s majo)
       const gridX = out.grid.x;
       const gridY = useLeftHand ? (ROWS - 1 - out.grid.y) : out.grid.y; // Y pozícia pre Level 1 (invert pre ľavú ruku)
-
-      // Hodnoty gyroskopu
-      const gyro = out.gyro || { x: 0, y: 0, z: 0 };
-      const GYRO_ROTATION_THRESHOLD = 20; // °/s
-      const GYRO_ROTATION_COOLDOWN_MS = 600; // ms
 
       // === DETEKCIA TAP vs HOLD (Double Tap pre tvrdý pád) ===
       const TAP_MAX_DURATION = 200; // ms - maximálne trvanie pre tap
@@ -569,16 +571,8 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
         if (!movementStartedRef.current) {
           movementStartedRef.current = true;
         }
-        // === ROTÁCIA pri grip + gyroZ > prah ===
-        if (!hardDropAnimatingRef.current && gyro.z > GYRO_ROTATION_THRESHOLD && out.gyroZWasReleased && now - lastGestureTimeRef.current >= GYRO_ROTATION_COOLDOWN_MS) {
-          g.tetris.rotate();
-          lastGestureTimeRef.current = now;
-          imuCtrlRef.current?.consumeGyroZ();
-          rotationBlockedUntilRef.current = now + ROTATION_HARDDROP_BLOCK_MS;
-          // krátko zablokovať pohyb kým rotácia nedokončí
-          isRotatingRef.current = true;
-          setTimeout(() => { isRotatingRef.current = false; }, GYRO_ROTATION_COOLDOWN_MS);
-        }
+        // Otočenie zápästím rieši len InputMapper (BTN_ROTATE v hernej slučke, so znamienkom podľa ruky). Druhá kópia tu
+        // (gyro z kontroléra, len v jednom smere) by pri rýchlom otočení otočila blok dvakrát.
 
         // === POHYB pri grip (relatívny) ===
         if (!wasGrippingForMoveRef.current) {
@@ -657,7 +651,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       if (g.isGameOver) return;
 
       // Pokiaľ kalibrácia nie je dokončená, preskočiť herné aktualizácie (len ak je WS pripojené)
-      if (!isCalibrated && wsConnected) {
+      if (calibFrozenRef.current) {
         // stále vyvolať render aby UI zobrazilo kalibračný modal/overlay
         forceUpdate({});
         return;
@@ -782,7 +776,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('imu-sample', handleImuSample);
     };
-  }, [level, onBackToMenu, gravitySpeed]);
+  }, [level, gravitySpeed]);
 
   const restartGame = () => {
     const g = gameRef.current;
