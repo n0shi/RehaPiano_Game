@@ -102,6 +102,20 @@ export class Tetris {
     return false;
   }
 
+  /**
+   * Posunie aktívny blok k bunke (tx, ty) po jednej bunke (najprv vodorovne, potom zvisle; pri prekážke skúsi druhú os), kým sa dá.
+   * Presun rukou: blok tak nepreskočí cez stĺpec iných blokov (skok priamo na cieľ kontroloval len cieľovú polohu).
+   */
+  moveToward(tx: number, ty: number): void {
+    for (let i = 0; i < 64 && this.active; i++) {
+      const dx = Math.sign(tx - this.active.x), dy = Math.sign(ty - this.active.y);
+      if (!dx && !dy) return;
+      if (dx && this.move(dx, 0)) continue;
+      if (dy && this.move(0, dy)) continue;
+      return;
+    }
+  }
+
   rotate(): boolean {
     if (!this.active) return false;
 
