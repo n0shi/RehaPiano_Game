@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { sampleDt } from '../utils/sampleClock';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
 import { gripOf } from '../utils/fingerCalibration';
@@ -262,7 +263,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
       if (axisCalOpenRef.current) return; // beží kalibrácia osí
       if (p.handMode === 'dual' && d.hand && d.hand !== 'right') return;
       const now = Date.now();
-      const dt = Math.max(1, now - (lastTs || now)) / 1000;
+      const dt = sampleDt(d, now - (lastTs || now)); // hodiny streamera (utils/sampleClock.ts)
       lastTs = now; lastSampleRef.current = now;
       if (homeNeutralRef.current) ctrl.setReferenceQuat(homeNeutralRef.current); // základná poloha z globálnej kalibrácie (podľa nej sa pozná otočená rukavica)
       if (recenterRef.current) {

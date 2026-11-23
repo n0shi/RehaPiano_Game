@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
+import { sampleDt } from '../utils/sampleClock';
 import { Image, Coffee } from 'lucide-react';
 import SingleIMUController from '../utils/imuController';
 import {
@@ -695,7 +696,7 @@ export function GameBoard({
         
         const now = Date.now();
         const last = lastImuTsRef.current ?? now;
-        const dt = Math.max(1, now - last) / 1000;
+        const dt = sampleDt(detail, now - last); // hodiny streamera (utils/sampleClock.ts)
         lastImuTsRef.current = now;
 
         // fingers: kontrolér berie stisk z kalibrácie prstov (bez nich bral surové ADC a stisk bol trvalo zapnutý)

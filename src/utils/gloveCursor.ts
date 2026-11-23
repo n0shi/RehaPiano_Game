@@ -131,11 +131,15 @@ export class GloveCursor {
 
   constructor(public hooks: GloveCursorHooks = {}) {}
 
-  /** Kontrolér ľavej ruky pre režim dvoch rúk (vytvorí sa pri prvej potrebe). */
+  /**
+   * Kontrolér ľavej ruky pre režim dvoch rúk (vytvorí sa pri prvej potrebe). Nastavený rovnako ako hlavný (createCursorController):
+   * predtým to bol holý SingleIMUController so starým modelom (tanh, mŕtva zóna 0,05, saturácia na ±1, precisionScale 1,5 = stisk
+   * zmenil citlivosť ľavej ruky 1,5× a kurzor pri stisku skočil) a bez korekcie osí ľavej ruky – a jeho poloha sa priemerovala s pravou.
+   */
   ensureLeft(): SingleIMUController {
     if (!this.ctrlL) {
-      this.ctrlL = new SingleIMUController();
-      this.ctrlL.gyroDivisor = 1;
+      this.ctrlL = createCursorController();
+      applyAxisCorr(this.ctrlL, 'left');
     }
     return this.ctrlL;
   }
@@ -175,6 +179,7 @@ export class GloveCursor {
     applyAxisCorr(ctrl, inp.hand);
     // počas stisku sa nulový bod (a rozpoznanie otočenej ruky) nesmie meniť, inak vznikne neviditeľná stena
     ctrl.freezePose = grip;
+    if (this.ctrlL) this.ctrlL.freezePose = grip; // dve ruky: platí aj pre ľavú (jej vzorky idú cez feedLeft)
     const seqBefore = ctrl.recenterSeq;
     const out = ctrl.update(inp.sample, inp.dt);
     if (ctrl.recenterSeq !== seqBefore) this.anchor = { ...this.last };
@@ -300,7 +305,9 @@ export class GloveCursor {
 
   /** Režim dvoch rúk: vzorka ľavej ruky len aktualizuje jej kontrolér; výsledok sa odovzdá do step() ako `left`. */
   feedLeft(sample: Sample, dt: number) {
-    return this.ensureLeft().update(sample, dt);
+    const c = this.ensureLeft();
+    applyAxisCorr(c, 'left'); // uložená "Kalibrácia osí" ľavej ruky, zrkadlenie osí ľavej ruky
+    return c.update(sample, dt);
   }
 }
 

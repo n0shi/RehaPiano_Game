@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { sampleDt } from '../utils/sampleClock';
 import SingleIMUController from '../utils/imuController';
 import { useConfig } from '../config/ConfigContext';
 import { useCalibration } from '../context/CalibrationContext';
@@ -450,11 +451,11 @@ export function PentominoGame({
           if (h !== 'left' && h !== 'right') return;
           const tN = Date.now();
           if (h === 'left') {
-            const ctrlL = imuCtrlLRef.current;
-            if (!ctrlL) return;
-            const dtL = Math.max(1, tN - (dualRef.current.lastLeftTs || tN)) / 1000;
+            const glove = gloveRef.current;
+            if (!glove || !imuCtrlLRef.current) return;
+            const dtL = sampleDt(detail, tN - (dualRef.current.lastLeftTs || tN));
             dualRef.current.lastLeftTs = tN;
-            dualRef.current.left = { sample, out: ctrlL.update(sample, dtL), ts: tN };
+            dualRef.current.left = { sample, out: glove.feedLeft(sample, dtL), ts: tN }; // feedLeft: nastavenia a korekcia osí ľavej ruky
             return;
           }
           dualRef.current.rightTs = tN;
@@ -464,7 +465,7 @@ export function PentominoGame({
 
         const now = Date.now();
         const last = lastImuTsRef.current ?? now;
-        const dt = Math.max(1, now - last) / 1000;
+        const dt = sampleDt(detail, now - last); // hodiny streamera (utils/sampleClock.ts)
         lastImuTsRef.current = now;
         lastSampleAtRef.current = performance.now();
 
@@ -492,7 +493,7 @@ export function PentominoGame({
         if (!manip.isKeyRotating()) {
           // Pri ťahaní myšou, po výhre alebo v modale sa rukavica nepoužíva (rozpracované gesto sa zruší)
           const ready = !draggingRef.current && playableRef.current;
-          if (input.update({ grip, position, gyro }, performance.now(), ready)) {
+          if (input.update({ grip, position, gyro, dt }, performance.now(), ready)) {
             imuCtrlRef.current?.consumeGyroX(); // flip je vybavený: ďalší až po uvoľnení gyra
           }
         }

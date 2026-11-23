@@ -14,6 +14,7 @@ import { Blocks } from 'lucide-react';
 import { normalizeImuSample } from '../utils/imuNormalize';
 import { gripOf } from '../utils/fingerCalibration';
 import { GloveCursor, HoldFollow, posToCell } from '../utils/gloveCursor';
+import { sampleDt } from '../utils/sampleClock';
 
 // Komponent modálneho okna pre koniec hry
 interface TetrisFinishedModalProps {
@@ -454,11 +455,11 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       g.lastImuTime = Date.now();
       const now = Date.now();
       const last = lastImuTsRef.current ?? now;
-      const dt = Math.max(1, now - last) / 1000;
       lastImuTsRef.current = now;
 
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
+      const dt = sampleDt(detail, now - last); // hodiny streamera (utils/sampleClock.ts)
       
       // fingers: kontrolér berie stisk z kalibrácie prstov (bez nich bral surové ADC a stisk bol trvalo zapnutý)
       const sample = { imu: detail.imu || {}, adc: detail.adc || [], fingers: detail.fingers, ts: Date.now() } as any;

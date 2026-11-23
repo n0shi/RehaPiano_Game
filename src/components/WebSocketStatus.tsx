@@ -5,6 +5,7 @@ import { useCalibration } from '../context/CalibrationContext';
 import { useModal } from '../context/ModalContext';
 import { detectFingers } from '../utils/fingerCalibration';
 import { ReconnectingSocket } from '../utils/reconnectingSocket';
+import { SampleClock } from '../utils/sampleClock';
 
 interface WebSocketStatusProps {
   renderCalibrationButton?: (connected: boolean) => ReactNode;
@@ -28,7 +29,10 @@ export function WebSocketStatus({ renderCalibrationButton, hideCalibrationButton
 
     // Spojenie sa po strate samo obnovuje (utils/reconnectingSocket.ts): reštart streamera ani odpojenie rukavice
     // už nevyžadujú obnovenie stránky.
+    // dt medzi vzorkami podľa hodín streamera (utils/sampleClock.ts), každé zariadenie zvlášť
+    const clock = new SampleClock();
     const setStatus = (v: boolean) => {
+      clock.reset(); // po novom spojení sa čas streamera mohol začať odznova
       console.log(v ? 'Pripojený k streameru' : 'Odpojený od streamera, skúšam sa pripojiť znova');
       setConnected(v);
       // Nastaviť globálny stav a odoslať event pre ostatné komponenty
@@ -52,6 +56,8 @@ export function WebSocketStatus({ renderCalibrationButton, hideCalibrationButton
               // ktorá ruka (zariadenie) vzorku poslala: 'left' | 'right' (pre režim dvoch rúk)
               hand: parsed.hand,
               port: parsed.port,
+              // s od predchádzajúcej vzorky tohto zariadenia podľa hodín streamera (null = prvá vzorka); hry ho čítajú cez sampleDt
+              dt: clock.dt(parsed, performance.now()),
               // stav prstov podľa kalibrácie človeka (alebo pôvodného pevného prahu); počíta sa raz na vzorku kvôli hysteréze a driftu
               fingers: detectFingers(parsed.adc, parsed.hand, cfg),
             };

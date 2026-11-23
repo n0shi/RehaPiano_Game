@@ -44,6 +44,8 @@ export type InputFrame = {
   grip: boolean;                          // všetkých 5 prstov stisnutých
   position: Vec2;                         // poloha kurzora -1..1 (už v súradniciach obrazovky)
   gyro: { x: number; y: number; z: number }; // °/s
+  /** s od predchádzajúcej vzorky podľa hodín streamera (utils/sampleClock.ts); bez neho sa berie rozdiel `now` */
+  dt?: number;
 };
 
 export class CursorGripInput {
@@ -156,7 +158,9 @@ export class CursorGripInput {
    * Vracia true, ak vzorka odštartovala flip (volajúci môže „spotrebovať“ gyro X na kontroléri).
    */
   update(frame: InputFrame, now: number, ready: boolean): boolean {
-    const dt = this.lastSampleAt === null ? 0 : Math.max(0, (now - this.lastSampleAt) / 1000);
+    // Uhol otočenia sa integruje z gyra: dt z hodín prehliadača bol pri dávkach správ nerovnomerný (prvá vzorka celá pauza, ďalšie ~0)
+    const hostDt = this.lastSampleAt === null ? 0 : Math.max(0, (now - this.lastSampleAt) / 1000);
+    const dt = this.lastSampleAt === null ? 0 : (typeof frame.dt === 'number' && frame.dt > 0 ? frame.dt : hostDt);
     this.lastSampleAt = now;
     const { grip, gyro } = frame;
     if (!ready) { this.cancel(); return false; }

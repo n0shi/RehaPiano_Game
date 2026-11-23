@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { sampleDt } from '../utils/sampleClock';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
 import { gripOf } from '../utils/fingerCalibration';
@@ -146,7 +147,7 @@ export function MenuCursor({ screen, leftHand }: Props) {
       if (!ctrl) return;
 
       const now = Date.now();
-      const dt = Math.max(1, now - (lastSampleTs || now)) / 1000;
+      const dt = sampleDt(d, now - (lastSampleTs || now)); // hodiny streamera (utils/sampleClock.ts)
       lastSampleTs = now;
 
       if (neutralRef.current) ctrl.setReferenceQuat(neutralRef.current);

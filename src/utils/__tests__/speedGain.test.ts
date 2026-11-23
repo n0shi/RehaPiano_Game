@@ -57,3 +57,47 @@ describe('SpeedGain', () => {
     expect(g.gain()).toBe(CFG.slowGain);
   });
 });
+
+describe('SpeedGain: splácanie posunu', () => {
+  /** Posun vstupu o `dist` rýchlosťou `speed` (rozsah/s); vráti posledný výstup. */
+  function move(g: SpeedGain, from: number, dist: number, speed: number) {
+    const n = Math.max(1, Math.round(Math.abs(dist) / (speed * DT)));
+    let out = { x: 0, y: 0 };
+    for (let i = 1; i <= n; i++) out = g.apply({ x: from + (dist * i) / n, y: 0 }, DT);
+    return out;
+  }
+
+  it('pomaly tam a rýchlo späť: kurzor sa voči ruke neposúva bez obmedzenia', () => {
+    const run = (cfg: typeof CFG) => {
+      const g = new SpeedGain(cfg);
+      g.apply({ x: 0, y: 0 }, DT);
+      let out = { x: 0, y: 0 };
+      for (let k = 0; k < 6; k++) { move(g, 0, 0.4, 0.1); out = move(g, 0.4, -0.4, 3); }
+      return out.x; // ruka je späť v 0
+    };
+    const old = run({ ...CFG, driftBudget: 0, driftRepay: 0 });
+    const now = run(CFG);
+    expect(Math.abs(old)).toBeGreaterThan(0.8);                        // bez splácania: ~0,2 posunu na každý cyklus
+    expect(Math.abs(now)).toBeLessThanOrEqual(CFG.driftBudget! + 0.02); // so splácaním: najviac rozpočet
+  });
+
+  it('jeden rýchly prejazd si dosah ponechá (rozdiel do rozpočtu)', () => {
+    const g = new SpeedGain(CFG);
+    g.apply({ x: -0.5, y: 0 }, DT);
+    const out = move(g, -0.5, 1, 3);
+    expect(out.x - 0.5).toBeGreaterThan(CFG.driftBudget! - 0.02);
+  });
+
+  it('splácanie nemení smer pohybu (diagonála ostáva diagonálou)', () => {
+    const g = new SpeedGain(CFG);
+    g.apply({ x: 0, y: 0 }, DT);
+    move(g, 0, 0.6, 0.1); // vytvor dlh pozdĺž x
+    let prev = g.apply({ x: 0.6, y: 0 }, DT);
+    for (let i = 1; i <= 40; i++) {
+      const out = g.apply({ x: 0.6 - 0.02 * i, y: 0.02 * i }, DT);
+      const dx = out.x - prev.x, dy = out.y - prev.y;
+      expect(Math.abs(Math.atan2(dy, -dx) - Math.PI / 4)).toBeLessThan(1e-6);
+      prev = out;
+    }
+  });
+});
