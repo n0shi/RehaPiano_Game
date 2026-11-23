@@ -1,7 +1,9 @@
 import { useEffect, useRef } from 'react';
+import { sampleDt } from '../utils/sampleClock';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
-import { pressedCountOf } from '../utils/fingerCalibration';
+import { gripOf } from '../utils/fingerCalibration';
+import { applyCursorModel } from '../utils/cursorModel';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 
@@ -9,7 +11,6 @@ import { useConfig } from '../config/ConfigContext';
 // Je úplne oddelený od ovládania v hrách: má vlastný SingleIMUController, vlastné počúvanie
 // 'imu-sample' a nikam nezapisuje stav hry. Klik = stisk všetkých 5 prstov.
 
-const CLICK_FINGERS = 5;        // koľko prstov musí byť stlačených pre klik
 const SCREEN_GAIN = 1.0;        // citlivosť: 1 = plný náklon pokryje celú obrazovku
 // Vyhladenie: kontrolér má One Euro filter (ako v Pentomine) – v pokoji silno vyhladí chvenie, pri pohybe takmer bez oneskorenia.
 // Predtým tu boli dve EMA za sebou (kontrolér 0,28 + obrazovka 0,35 ≈ 40 ms oneskorenia), kurzor preto za rukou "ťahal".
@@ -23,8 +24,6 @@ const CALIB_SHOW_MS = 500;      // priebeh vynulovania sa zobrazí až po tejto 
 // Rovnako ako v Pentomine a v kreslení: uvoľnenie prstov samo nakloní rukavicu, kurzor preto chvíľu stojí a potom sa nulový bod
 // vynuluje v polohe otvorenej ruky (počas stisku kurzor stojí, takže by inak po uvoľnení skočil tam, kam sa ruka medzitým pohla).
 const RELEASE_FREEZE_MS = 350;
-// Výpadok jedného prsta (4 z 5) sa za uvoľnenie považuje až po tomto čase (pohyb zápästia mení napätie tenzometrov).
-const GRIP_DROPOUT_MS = 250;
 const HOVER_ATTR = 'data-imu-hover';
 
 type Props = {
@@ -59,8 +58,12 @@ export function MenuCursor({ screen, leftHand }: Props) {
       c.tiltDeadzone = TILT_DEADZONE;
       // bez saturácie: pri okraji sa dá kurzor vždy odtiahnuť späť. Mŕtva zóna ostáva (predvolených 0,05 rad): bez nej sa kurzor
       // v pokoji "túla" (v zázname ~110 px pri pokoji, s ňou ~12 px) – kvôli chveniu ruky
-      c.autoReach = true; // dosah výchylky sa vyrovná medzi smermi a medzi polohami
-      c.autoAxes = true; // osi otočenej polohy sa spresňujú z ťahov ruky
+      // autoReach a autoAxes ostávajú vypnuté. Do opravy stisku v kontroléri (sample.fingers) nikdy nebežali, hoci tu boli zapnuté;
+      // po oprave ich prehratie záznamov (tools/replay.sh) ukázalo ako horšie: bočná odchýlka v zvyčajnej polohe 0,31 -> 0,37 a rozptyl
+      // dosahu medzi smermi 2,7x -> 3,0x (zosilnenie sa učí z malých výchyliek a veľký pohyb potom preletí).
+      c.autoReach = false;
+      c.autoAxes = false;
+      applyCursorModel(c); // model pohyb -> kurzor: prepína sa v utils/cursorModel.ts
       // otočená poloha (kosť na 90°): zvislé pohyby boli slabšie než vodorovné a hore kurzor ušiel doľava. Laditeľné v konzole:
       // localStorage.setItem('rehapiano.menuRolled', '{"up":1.4,"down":1.7,"shear":-0.2}') a obnoviť stránku
       c.rolledTune = { up: 1.4, down: 1.7, shear: -0.2 };
@@ -89,7 +92,6 @@ export function MenuCursor({ screen, leftHand }: Props) {
     let calibDoneTimer = 0;
     let lastSampleTs = 0;
     let hovered: Element | null = null;
-    let gripLostAt = 0;
     let releaseUntil = 0;         // kurzor stojí po uvoľnení prstov do tohto času (0 = nie)
     let lastNx = 0, lastNy = 0;   // náklon z poslednej vzorky (px), na dorovnanie kotvy bez skoku
 
@@ -103,7 +105,7 @@ export function MenuCursor({ screen, leftHand }: Props) {
     const targetAt = (x: number, y: number): HTMLElement | null => {
       const el = document.elementFromPoint(x, y);
       const t = el?.closest('button, a, [role="button"]') as HTMLElement | null;
-      if (!t || (t as HTMLButtonElement).disabled) return null;
+      if (!t || (t as HTMLButtonElement).disabled || t.closest('[data-no-glove]')) return null; // data-no-glove: len myšou (účet, odhlásenie)
       return t;
     };
 
@@ -145,7 +147,7 @@ export function MenuCursor({ screen, leftHand }: Props) {
       if (!ctrl) return;
 
       const now = Date.now();
-      const dt = Math.max(1, now - (lastSampleTs || now)) / 1000;
+      const dt = sampleDt(d, now - (lastSampleTs || now)); // hodiny streamera (utils/sampleClock.ts)
       lastSampleTs = now;
 
       if (neutralRef.current) ctrl.setReferenceQuat(neutralRef.current);
@@ -158,18 +160,12 @@ export function MenuCursor({ screen, leftHand }: Props) {
       const left = p.handMode === 'dual' ? false : d.hand === 'left' ? true : d.hand === 'right' ? false : p.leftHand;
       applyAxisCorr(ctrl, left ? 'left' : 'right');
       const seqBefore = ctrl.recenterSeq;
-      const out = ctrl.update({ imu: d.imu || {}, adc: d.adc || [], ts: now } as any, dt);
+      const out = ctrl.update({ imu: d.imu || {}, adc: d.adc || [], ts: now, fingers: d.fingers } as any, dt);
 
       if (ctrl.recenterSeq !== seqBefore) { anchor.x = pos.x; anchor.y = pos.y; } // kontrolér sám vynuloval náklon: kurzor ostane na mieste
 
       // Stisk prstov (rovnaké prahy ako v hrách); krátky výpadok jedného prsta stisk neruší
-      const pressed = pressedCountOf(d, cfg); // kalibrované prahy prstov (detail.fingers z WebSocketStatus)
-      let grip = pressed >= CLICK_FINGERS;
-      if (grip) gripLostAt = 0;
-      else if (wasGrip && pressed === CLICK_FINGERS - 1) {
-        if (!gripLostAt) gripLostAt = now;
-        if (now - gripLostAt < GRIP_DROPOUT_MS) grip = true;
-      } else gripLostAt = 0;
+      const grip = gripOf(d, cfg); // stisk ruky s hysterézou (fingerCalibration.handGrip): začne pri 5 prstoch, drží pri 4
 
       // Zrkadlenie osí rovnaké ako pri ovládaní v hrách (ľavá: Y obrátené, pravá: X obrátené)
       const nx = (left ? out.posNorm.x : -out.posNorm.x) * SCREEN_GAIN;

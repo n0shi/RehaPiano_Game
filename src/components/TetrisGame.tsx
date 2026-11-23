@@ -11,8 +11,10 @@ import { useCalibration } from '../context/CalibrationContext';
 import { CalibrationModal } from './CalibrationModal';
 import { ModalBackdrop } from './ModalBackdrop';
 import { Blocks } from 'lucide-react';
-import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
-import type { FingerState } from '../utils/fingerCalibration';
+import { normalizeImuSample } from '../utils/imuNormalize';
+import { gripOf } from '../utils/fingerCalibration';
+import { GloveCursor, HoldFollow, posToCell } from '../utils/gloveCursor';
+import { sampleDt } from '../utils/sampleClock';
 
 // Komponent modálneho okna pre koniec hry
 interface TetrisFinishedModalProps {
@@ -142,17 +144,26 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
   const { isCalibrated, neutralQuat, requestCalibration } = useCalibration();
   const [imuDebug, setImuDebug] = useState<any>({});
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  // Hlavný effect hry beží raz na hru: hodnoty, ktoré sa menia počas hry, číta cez refy. Predtým boli v uzávere zachytené
+  // pri štarte (wsConnected vždy false -> hra sa počas kalibrácie nezmrazila) a onBackToMenu bol v závislostiach – je to nová
+  // funkcia pri každom prekreslení App, takže každá zmena kalibrácie (Rekalibrovať, dokončenie kalibrácie) hru reštartovala.
+  const onBackToMenuRef = useRef(onBackToMenu);
+  onBackToMenuRef.current = onBackToMenu;
+  const calibFrozenRef = useRef(false); // rukavica pripojená, ale ešte nekalibrovaná -> herný vstup stojí
+  calibFrozenRef.current = !isCalibrated && wsConnected;
   // === VIZUÁLNA INDIKÁCIA STISKU (GRIP) ===
   const [isGripping, setIsGripping] = useState<boolean>(false);
 
   // === POHYB OVLÁDANÝ STISKNUTÍM (kopírované z PentominoGame) ===
-  const imuCtrlRef = useRef<SingleIMUController | null>(null);
+  // Pohyb ruky -> kurzor ako v Pentomine (utils/gloveCursor.ts); blok ide za rukou od svojej polohy (HoldFollow).
+  // Vytvára sa hneď pri prvom vykreslení, aby ho effect s neutrálnou polohou z kalibrácie už našiel.
+  const gloveRef = useRef<GloveCursor | null>(null);
+  if (!gloveRef.current) gloveRef.current = new GloveCursor();
+  const followRef = useRef(new HoldFollow(COLS, ROWS));
+  const imuCtrlRef = useRef<SingleIMUController | null>(gloveRef.current.ctrl);
   const lastImuTsRef = useRef<number | null>(null);
-  const gripStartGridXRef = useRef<number | null>(null); // Pozícia ruky na začiatku gripu (X)
-  const gripStartGridYRef = useRef<number | null>(null); // Pozícia ruky na začiatku gripu (Y)
-  const gripStartPieceXRef = useRef<number | null>(null); // Pozícia bloku na začiatku gripu (X)
-  const gripStartPieceYRef = useRef<number | null>(null); // Pozícia bloku na začiatku gripu (Y)
-  const wasGrippingForMoveRef = useRef<boolean>(false); // Predchádzajúci stav gripu pre pohyb
+  const gripStartCellRef = useRef<{ x: number; y: number } | null>(null); // bunka pod kurzorom na začiatku presunu (na dvojité ťuknutie)
+  const followPieceRef = useRef(-1); // placedCount pri začiatku presunu: nový blok (po páde počas stisku) začne presun od svojej polohy
   const lastGyroRotateTimeRef = useRef<number>(0); // Čas poslednej gyro rotácie
   const gyroZWasReleasedRef = useRef<boolean>(true); // Hysterézia pre gyroZ
   const lastGestureTimeRef = useRef<number>(0);
@@ -267,6 +278,8 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
     if (imuCtrlRef.current && neutralQuat) {
       imuCtrlRef.current.calibrateNeutral(neutralQuat);
     }
+    gloveRef.current?.reset();
+    followRef.current.end();
   }, [neutralQuat]);
 
   // Stav načítavania
@@ -343,7 +356,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
 
         // Ak neboli umiestnené žiadne kúsky, vrátiť sa do menu
         if (g.tetris.placedCount === 0) {
-          onBackToMenu();
+          onBackToMenuRef.current();
           return;
         }
         
@@ -364,7 +377,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       // Ak je otvorený akýkoľvek modal, zablokovať herný vstup
       if ((window as any).__modalOpen) return;
       // Ak prebieha kalibrácia a WS je pripojený, zmraziť vstupy
-      if (!isCalibrated && wsConnected) return;
+      if (calibFrozenRef.current) return;
 
       // F1 - prepnutie nastavení
       if (e.key === 'F1') {
@@ -381,7 +394,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       const key = e.key.toLowerCase();
 
       if (key === 'escape') {
-        onBackToMenu();
+        onBackToMenuRef.current();
         return;
       }
 
@@ -430,55 +443,42 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
 
     window.addEventListener('keydown', handleKeyDown);
 
-    // IMU event listener - PRESNÁ KÓPIA z PentominoGame
-    if (!imuCtrlRef.current) imuCtrlRef.current = new SingleIMUController();
-    // Nastaviť veľkosť gridu pre Tetris (stĺpce)
-    imuCtrlRef.current.gridSize = COLS;
-    
+    // Vzorky z rukavice: stisk a pohyb ruky ako v Pentomine (fingerCalibration.gripOf + utils/gloveCursor.ts)
     const handleImuSample = (e: Event) => {
       // Ak je otvorený modal, ignorovať IMU vzorky pre hernú logiku
       if ((window as any).__modalOpen) return;
       // Zmraziť IMU-riadenú logiku kým nie je dokončená kalibrácia (len ak je WS pripojené)
-      if (!isCalibrated && wsConnected) return;
+      if (calibFrozenRef.current) return;
       const g = gameRef.current;
       if (!g) return;
 
       g.lastImuTime = Date.now();
       const now = Date.now();
       const last = lastImuTsRef.current ?? now;
-      const dt = Math.max(1, now - last) / 1000;
       lastImuTsRef.current = now;
 
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
+      const dt = sampleDt(detail, now - last); // hodiny streamera (utils/sampleClock.ts)
       
-      const sample = { imu: detail.imu || {}, adc: detail.adc || [], ts: Date.now() } as any;
+      // fingers: kontrolér berie stisk z kalibrácie prstov (bez nich bral surové ADC a stisk bol trvalo zapnutý)
+      const sample = { imu: detail.imu || {}, adc: detail.adc || [], fingers: detail.fingers, ts: Date.now() } as any;
       const adc: number[] = Array.isArray(detail.adc) ? detail.adc : [];
-
-      // === DETEKCIA STISKU (presne ako v PentominoGame) ===
       let fingersRaw = adc.slice(1, 6).map((v: any) => Number(v || 0));
       const fingers = useLeftHand ? fingersRaw : fingersRaw.slice().reverse();
 
-      const defaultRawThr = (cfg as any)?.TENSOMETER_RAW_THRESHOLD ?? 2000;
-      const defaultNormThr = (cfg as any)?.TENSOMETER_NORM_THRESHOLD ?? 12;
+      // === STISK (ako v Pentomine) ===
+      // Kalibrované prsty človeka s hysterézou (začne pri 5 prstoch, drží pri 4, krátko aj pri 3); bez kalibrácie pôvodný pevný prah.
+      // Predtým tu platilo "presne 5 prstov" bez hysterézy: pri pohybe zápästia jeden prst krátko povolil a presun sa prerušil.
+      const manualGrip = gripOf(detail, cfg);
+      setIsGripping(manualGrip);
+      // Ten istý stisk platí aj pre otočenie, pád a "equip" v InputMapperi (predtým vlastný pevný prah ADC)
+      g.inputMapper.setGrip(manualGrip);
 
-      let pressedCount = 0;
-      const fs = detail.fingers as FingerState | undefined;
-      if (fs?.calibrated) pressedCount = fs.count; // kalibrované prahy prstov človeka
-      else for (let i = 0; i < fingers.length; i++) {
-        const raw = Math.abs(fingers[i] ?? 0);
-        const norm = normalizeAdc(raw);
-        if (raw > defaultRawThr || norm > defaultNormThr) pressedCount++;
-      }
-      const manualGrip = pressedCount === 5;
-      
-      // Aktualizovať vizuálny stav gripu pre neon glow: zobrazovať len keď sú stlačené VŠETKY päť prstov
-      setIsGripping(pressedCount === 5);
-
-      // Posielať ADC do InputMapper (pre detekciu pádu)
+      // Posielať ADC do InputMapper (tlačidlá prstov)
       g.inputMapper.feedAdc(fingers);
 
-      // Spracovanie IMU dát pre InputMapper (detekcia pádu)
+      // Spracovanie IMU dát pre InputMapper (otočenie, pád)
       let imuData = detail.imu;
       if (imuData) {
         imuData = { ...imuData };
@@ -491,18 +491,14 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       }
       g.inputMapper.feedImu(imuData);
 
-      // === Aktualizácia SingleIMUController (pre pozíciu na gride) ===
-      const out = imuCtrlRef.current!.update(sample, dt);
-
-      // Pozícia na gride z IMU (rovnako ako v PentominoGame)
-      // Namapovať pozíciu na gride podľa vybratej ruky (1:1 s majo)
-      const gridX = out.grid.x;
-      const gridY = useLeftHand ? (ROWS - 1 - out.grid.y) : out.grid.y; // Y pozícia pre Level 1 (invert pre ľavú ruku)
-
-      // Hodnoty gyroskopu
-      const gyro = out.gyro || { x: 0, y: 0, z: 0 };
-      const GYRO_ROTATION_THRESHOLD = 20; // °/s
-      const GYRO_ROTATION_COOLDOWN_MS = 600; // ms
+      // === Pohyb ruky -> kurzor (rovnaký ako v Pentomine) ===
+      // Ruka podľa zariadenia (stream posiela 'hand'), výber v menu len ako záloha
+      const hand = detail.hand === 'left' || detail.hand === 'right' ? detail.hand : useLeftHand ? 'left' : 'right';
+      const st = gloveRef.current!.step({ sample, hand, hold: manualGrip, dt });
+      const out = st.out;
+      // bunka pod kurzorom (na rozlíšenie ťuknutia od presunu)
+      const gridX = Math.round(posToCell(st.position.x, COLS));
+      const gridY = Math.round(posToCell(st.position.y, ROWS));
 
       // === DETEKCIA TAP vs HOLD (Double Tap pre tvrdý pád) ===
       const TAP_MAX_DURATION = 200; // ms - maximálne trvanie pre tap
@@ -537,9 +533,8 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
               // DRUHÝ TAP v okne -> tvrdý pád ak je stabilizované (povoliť rýchly double-tap alebo malý pohyb)
               const STABLE_CELL_THRESHOLD = 1;
               const STABILIZE_MS = 300; // povoliť rýchly druhý tap do 300 ms
-              const startGridX = gripStartGridXRef.current;
-              const startGridY = gripStartGridYRef.current;
-              const movedCells = (startGridX !== null && startGridY !== null) ? Math.abs(gridX - startGridX) + Math.abs(gridY - startGridY) : 0;
+              const start = gripStartCellRef.current;
+              const movedCells = start ? Math.abs(gridX - start.x) + Math.abs(gridY - start.y) : 0;
               const timeSinceFirst = now - gripStartTimeRef.current;
               const allowDoubleTap = (movedCells <= STABLE_CELL_THRESHOLD) || (timeSinceFirst <= STABILIZE_MS);
               if (allowDoubleTap && g.tetris.active && g.blockEquipped) {
@@ -569,67 +564,28 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
         if (!movementStartedRef.current) {
           movementStartedRef.current = true;
         }
-        // === ROTÁCIA pri grip + gyroZ > prah ===
-        if (!hardDropAnimatingRef.current && gyro.z > GYRO_ROTATION_THRESHOLD && out.gyroZWasReleased && now - lastGestureTimeRef.current >= GYRO_ROTATION_COOLDOWN_MS) {
-          g.tetris.rotate();
-          lastGestureTimeRef.current = now;
-          imuCtrlRef.current?.consumeGyroZ();
-          rotationBlockedUntilRef.current = now + ROTATION_HARDDROP_BLOCK_MS;
-          // krátko zablokovať pohyb kým rotácia nedokončí
-          isRotatingRef.current = true;
-          setTimeout(() => { isRotatingRef.current = false; }, GYRO_ROTATION_COOLDOWN_MS);
-        }
+        // Otočenie zápästím rieši len InputMapper (BTN_ROTATE v hernej slučke, so znamienkom podľa ruky). Druhá kópia tu
+        // (gyro z kontroléra, len v jednom smere) by pri rýchlom otočení otočila blok dvakrát.
 
-        // === POHYB pri grip (relatívny) ===
-        if (!wasGrippingForMoveRef.current) {
-          // Začiatok gripu - uložiť počiatočné pozície (použiť celočíselný anchor ako v Pentomino)
-            gripStartGridXRef.current = gridX;
-            gripStartGridYRef.current = gridY;
-            // uložiť anchor kúsku (active.x/y) pre 1:1 mapovanie
-            gripStartPieceXRef.current = g.tetris.active!.x;
-            gripStartPieceYRef.current = g.tetris.active!.y;
-            wasGrippingForMoveRef.current = true;
+        // === POHYB pri stisku: blok ide za rukou ako v Pentomine ===
+        // Na začiatku presunu sa kurzor "položí" na blok; potom je cieľ bloku bunka pod kurzorom (v Level 2 len vodorovne).
+        // Blok ide k cieľu po bunkách (moveToward), takže neprejde cez iné bloky.
+        const follow = followRef.current;
+        const active = g.tetris.active!;
+        if (!follow.active || followPieceRef.current !== g.tetris.placedCount) {
+          follow.begin(gloveRef.current!, active.x, active.y);
+          followPieceRef.current = g.tetris.placedCount;
+          if (!gripStartCellRef.current) gripStartCellRef.current = { x: gridX, y: gridY };
         } else {
-          // Grip pokračuje - relatívny posun
-          const startGridX = gripStartGridXRef.current;
-          const startGridY = gripStartGridYRef.current;
-          const startPieceX = gripStartPieceXRef.current;
-          const startPieceY = gripStartPieceYRef.current;
-          
-            if (startGridX !== null && startPieceX !== null) {
-            // Vypočítať celočíselný cieľ ukotvený na piece.x/y (1:1 s Pentomino)
-            const deltaX = gridX - startGridX;
-            const desiredX = Math.round(startPieceX + deltaX);
-
-            let desiredY = startPieceY;
-            if (level === 1 && startGridY !== null && startPieceY !== null) {
-              const deltaY = gridY - startGridY;
-              desiredY = Math.round(startPieceY + deltaY);
-            }
-
-            // Aktualizovať len ak sa pozícia zmenila
-            const curX = g.tetris.active!.x;
-            const curY = g.tetris.active!.y;
-            if (desiredX !== curX || desiredY !== curY) {
-              const candidate = new Piece(g.tetris.active!.kind);
-              candidate.x = desiredX;
-              candidate.y = desiredY ?? candidate.y;
-              candidate.rot = g.tetris.active!.rot;
-              if (!g.tetris.collides(candidate)) {
-                g.tetris.active = candidate;
-              }
-            }
-          }
+          const t = follow.target(st.position);
+          if (t) g.tetris.moveToward(t.x, level === 1 ? t.y : active.y);
         }
       }
-      
-      // Resetovať pohybové refy ak nie je HOLD
-      if (!isHold && wasGrippingForMoveRef.current) {
-        wasGrippingForMoveRef.current = false;
-        gripStartGridXRef.current = null;
-        gripStartGridYRef.current = null;
-        gripStartPieceXRef.current = null;
-        gripStartPieceYRef.current = null;
+
+      // Koniec presunu (uvoľnenie, nový blok, animácia): ďalší presun začne znova od polohy bloku
+      if ((!isHold || !g.tetris.active) && followRef.current.active) {
+        followRef.current.end();
+        gripStartCellRef.current = null;
       }
 
       const imuN = normalizeImuSample(sample.imu);
@@ -657,7 +613,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       if (g.isGameOver) return;
 
       // Pokiaľ kalibrácia nie je dokončená, preskočiť herné aktualizácie (len ak je WS pripojené)
-      if (!isCalibrated && wsConnected) {
+      if (calibFrozenRef.current) {
         // stále vyvolať render aby UI zobrazilo kalibračný modal/overlay
         forceUpdate({});
         return;
@@ -782,7 +738,7 @@ export function TetrisGame({ onBackToMenu, level, useLeftHand }: TetrisGameProps
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('imu-sample', handleImuSample);
     };
-  }, [level, onBackToMenu, gravitySpeed]);
+  }, [level, gravitySpeed]);
 
   const restartGame = () => {
     const g = gameRef.current;

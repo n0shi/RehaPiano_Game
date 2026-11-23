@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { sampleDt } from '../utils/sampleClock';
 import SingleIMUController from '../utils/imuController';
 import { applyAxisCorr } from '../utils/axisCalibration';
-import { pressedCountOf } from '../utils/fingerCalibration';
+import { gripOf } from '../utils/fingerCalibration';
+import { applyCursorModel, currentCursorModel } from '../utils/cursorModel';
+import { useAuth } from '../context/AuthContext';
+import { SessionRecorder } from '../utils/sessionRecorder';
+import { addResult, DRAW_COMPLETE_COVERAGE } from '../utils/results';
+import { outline, evaluate, sizeLabel, REF_SCALE, MIN_STROKE_POINTS, type ShapeKey, type Pt, type Result } from '../utils/drawingScore';
 import { useCalibration } from '../context/CalibrationContext';
 import { useConfig } from '../config/ConfigContext';
 import { MenuCursor } from './MenuCursor';
@@ -11,9 +17,6 @@ import { AxisCalibrationModal } from './AxisCalibrationModal';
 // a rukavicou ho obkreslí. Slúži na vyskúšanie ovládania a presnosti pohybu.
 // Je úplne oddelené od hier – vlastný SingleIMUController a vlastné počúvanie 'imu-sample'.
 
-type ShapeKey = 'triangle' | 'circle' | 'square' | 'rhombus';
-type Pt = [number, number];
-
 const SHAPES: { key: ShapeKey; label: string; glyph: string }[] = [
   { key: 'triangle', label: 'Trojuholník', glyph: '△' },
   { key: 'circle', label: 'Kruh', glyph: '○' },
@@ -21,7 +24,6 @@ const SHAPES: { key: ShapeKey; label: string; glyph: string }[] = [
   { key: 'rhombus', label: 'Kosoštvorec', glyph: '◇' },
 ];
 
-const PEN_FINGERS = 5;          // stisnuté prsty = pero dole
 const CURSOR_SMOOTH = 0.35;
 // Otočená ruka ("kosť") mala navyše One Euro filter (0,9 Hz, beta 0,006). Na zázname kruhu (pose_20261102) tremor takmer neznížil
 // (3,00 vs 3,01 px), ale pridal oneskorenie 13 px (bez neho 5 px) a nerovnomernú rýchlosť kurzora voči ruke (33 % vs 11 %): pri pomalšom
@@ -32,9 +34,6 @@ const LEVELS = [
   { level: 2, label: 'Úroveň 2', hint: 'stredný', scale: 0.24 },
   { level: 3, label: 'Úroveň 3', hint: 'veľký', scale: 0.32 },
 ];
-const REF_SCALE = 0.32;         // veľkosť, pre ktorú sú nastavené tolerancie hodnotenia
-const MIN_STROKE_POINTS = 20;
-const COVER_TOL = 0.18;         // tolerancia pokrytia obrysu (v jednotkách tvaru)
 const SAMPLE_TIMEOUT_MS = 1500;
 const DATA_LOSS_MS = 2000;      // (stream sa každých ~40 s na ~1 s preruší a znovu pripojí, preto nie menej)  bez vzoriek dlhšie ako toto sa rozpracovaný ťah zahodí a pred ďalším treba uvoľniť prsty
 const CURSOR_COLOR = '#17647d';
@@ -54,65 +53,20 @@ const PEN_SETTLE_MS = 180;      // po stisku prstov chvíľu počkaj (ruka sa pr
 // kurzor chvíľu stojí a potom sa nulový bod vynuluje v polohe otvorenej ruky – kurzor po zdvihnutí pera neodskočí.
 const RELEASE_FREEZE_MS = 350;
 const RELEASE_LOOKBACK_MS = 80; // koniec ťahu: body z posledných 80 ms pred uvoľnením sú už trhnutie od otvárania prstov, nekreslia sa
-// Výpadok jedného prsta (4 z 5) sa za uvoľnenie považuje až po tomto čase: pohyb zápästia mení napätie tenzometrov a ťah sa trhal na kúsky.
-const GRIP_DROPOUT_MS = 250;
-
-/** Obrys tvaru v súradniciach -1..1, hustý zatvorený polygón. */
-function outline(key: ShapeKey): Pt[] {
-  if (key === 'circle') {
-    return Array.from({ length: 240 }, (_, i) => {
-      const a = (i / 240) * Math.PI * 2;
-      return [Math.cos(a), Math.sin(a)] as Pt;
-    });
-  }
-  const verts: Record<Exclude<ShapeKey, 'circle'>, Pt[]> = {
-    triangle: [[0, -1], [0.95, 0.7], [-0.95, 0.7]],
-    square: [[-0.8, -0.8], [0.8, -0.8], [0.8, 0.8], [-0.8, 0.8]],
-    rhombus: [[0, -1], [0.75, 0], [0, 1], [-0.75, 0]],
-  };
-  const v = verts[key];
-  const pts: Pt[] = [];
-  for (let i = 0; i < v.length; i++) {
-    const a = v[i], b = v[(i + 1) % v.length];
-    const n = Math.max(1, Math.round(Math.hypot(b[0] - a[0], b[1] - a[1]) * 60)); // rovnaká hustota bodov na všetkých stranách
-    for (let k = 0; k < n; k++) pts.push([a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n]);
-  }
-  return pts;
-}
-
-type Result = { score: number; accuracy: number; coverage: number; range: number };
-
-// tolScale: tolerancie sú v jednotkách tvaru; pri menšom tvare sa zväčšia, aby zodpovedali rovnakej odchýlke v pixeloch
-function evaluate(trail: Pt[], shape: Pt[], tolScale = 1): Result {
-  let sum = 0;
-  for (const p of trail) {
-    let best = Infinity;
-    for (const q of shape) best = Math.min(best, Math.hypot(p[0] - q[0], p[1] - q[1]));
-    sum += best;
-  }
-  const meanDist = sum / trail.length;
-  let covered = 0;
-  for (const q of shape) {
-    for (const p of trail) {
-      if (Math.hypot(p[0] - q[0], p[1] - q[1]) < COVER_TOL * tolScale) { covered++; break; }
-    }
-  }
-  const coverage = covered / shape.length;
-  const accuracy = Math.max(0, 1 - meanDist / (0.35 * tolScale));
-  const xs = trail.map((p) => p[0]), ys = trail.map((p) => p[1]);
-  const range = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) / 2;
-  return { score: Math.round(100 * accuracy * coverage), accuracy, coverage, range };
-}
 
 type Props = { leftHand: boolean; onClose: () => void };
 
 export function ShapeTraceModal({ leftHand, onClose }: Props) {
   const { handMode, neutralQuat, neutralQuats } = useCalibration();
   const cfg = useConfig() as any;
+  const { user, recordConsent } = useAuth();
+  const recRef = useRef<SessionRecorder | null>(null); // záznam dát z rukavice (len so súhlasom používateľa)
   const [phase, setPhase] = useState<'pick' | 'draw'>('pick');
   const [shapeKey, setShapeKey] = useState<ShapeKey>('circle');
   const [level, setLevel] = useState(3);
   const [result, setResult] = useState<Result | null>(null);
+  const [resultMouse, setResultMouse] = useState(false); // zobrazený výsledok je z kresby myšou (neukladá sa)
+  const mouseStrokeRef = useRef(false);
   const [penDown, setPenDown] = useState(false);
   const [gloveLive, setGloveLive] = useState(false);
   const [axisCalOpen, setAxisCalOpen] = useState(false);
@@ -141,13 +95,14 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
   const anchorRef = useRef({ x: 400, y: 300 }); // bod, v ktorom bol kurzor pri poslednom vynulovaní náklonu
   const gripSinceRef = useRef(0);
   const prevGripRef = useRef(false);
-  const gripLostAtRef = useRef(0);
   const releaseUntilRef = useRef(0);          // kurzor stojí po uvoľnení prstov do tohto času (0 = nie)
   const trailTsRef = useRef<number[]>([]);    // časy bodov ťahu z rukavice (na orezanie konca ťahu)
   const armedRef = useRef(false);             // pero sa aktivuje až po uvoľnení prstov (aby klik na tvar nekreslil)
   const shapeRef = useRef<Pt[]>(outline('circle'));
   const scaleRef = useRef(REF_SCALE);
   scaleRef.current = LEVELS.find((l) => l.level === level)!.scale;
+  const shapeKeyRef = useRef(shapeKey); shapeKeyRef.current = shapeKey;
+  const levelRef = useRef(level); levelRef.current = level;
   const lastSampleRef = useRef(0);
   const propsRef = useRef({ leftHand, handMode });
   propsRef.current = { leftHand, handMode };
@@ -201,10 +156,20 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
     const { w, h } = sizeRef.current;
     const s = Math.min(w, h) * scaleRef.current;
     const norm = tr.map(([x, y]) => [(x - w / 2) / s, (y - h / 2) / s] as Pt);
-    setResult(evaluate(norm, shapeRef.current, REF_SCALE / scaleRef.current));
+    const res = evaluate(norm, shapeRef.current, REF_SCALE / scaleRef.current);
+    if (!res) return; // bodka / náhodný stisk: nie je to pokus o tvar
+    const mouse = mouseStrokeRef.current;
+    setResult(res);
+    setResultMouse(mouse);
+    recRef.current?.event({ type: 'result', points: tr.length, source: mouse ? 'mouse' : 'glove', ...res });
+    // Do pokroku používateľa ide len celý tvar nakreslený rukavicou: nedokončený ťah nie je meranie a kresba myšou nie je pohyb ruky
+    if (res.complete && !mouse) {
+      addResult({ t: Date.now(), kind: 'drawing', shape: shapeKeyRef.current, level: levelRef.current, score: res.score, accuracy: res.accuracy, coverage: res.coverage });
+    }
   }, []);
 
-  const penDownAt = useCallback((x: number, y: number) => {
+  const penDownAt = useCallback((x: number, y: number, mouse = false) => {
+    mouseStrokeRef.current = mouse;
     penRef.current = true; setPenDown(true);
     trailRef.current = [[x, y]]; trailTsRef.current = [Date.now()]; setResult(null);
   }, []);
@@ -232,6 +197,21 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
     return () => window.removeEventListener('resize', fit);
   }, [phase, render]);
 
+  // Záznam dát: beží počas kreslenia, ak s ním používateľ pri vstupe do relácie súhlasil
+  const userId = user?.id;
+  useEffect(() => {
+    if (phase !== 'draw' || !userId || !recordConsent) return;
+    const rec = new SessionRecorder(userId, 'drawing', {
+      hand: handMode === 'dual' ? 'right' : leftHand ? 'left' : 'right', cursorModel: currentCursorModel(),
+    });
+    recRef.current = rec;
+    return () => { recRef.current = null; void rec.stop(); };
+  }, [phase, userId, recordConsent, leftHand, handMode]);
+  useEffect(() => {
+    if (phase !== 'draw') return;
+    recRef.current?.event({ type: 'shape', shape: shapeKey, level, scale: LEVELS.find((l) => l.level === level)!.scale, w: sizeRef.current.w, h: sizeRef.current.h });
+  }, [phase, shapeKey, level, userId, recordConsent]);
+
   // rukavica -> kurzor a pero
   useEffect(() => {
     if (phase !== 'draw') return;
@@ -248,6 +228,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
       c.cellHysteresis = 0.3;
       // žiadna mŕtva zóna v strede ani saturácia na okraji: kurzor ide presne za rukou
       c.tiltDeadzone = 0;
+      applyCursorModel(c); // model pohyb -> kurzor: prepína sa v utils/cursorModel.ts
       c.autoReach = false; // pri kreslení pevné lineárne zosilnenie: meniace sa zosilnenie podľa smeru pôsobilo ako stena
       c.autoAxes = false; // pri kreslení pevné vstavané osi otočenej polohy: priebežné učenie osí (a osi naučené v menu) kurzorom počas kruhu cukalo
       // otočená poloha (kosť na 90°) – rovnaké doladenie zvislých pohybov ako v menu; zvyčajnú polohu sa netýka. Laditeľné v konzole:
@@ -282,7 +263,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
       if (axisCalOpenRef.current) return; // beží kalibrácia osí
       if (p.handMode === 'dual' && d.hand && d.hand !== 'right') return;
       const now = Date.now();
-      const dt = Math.max(1, now - (lastTs || now)) / 1000;
+      const dt = sampleDt(d, now - (lastTs || now)); // hodiny streamera (utils/sampleClock.ts)
       lastTs = now; lastSampleRef.current = now;
       if (homeNeutralRef.current) ctrl.setReferenceQuat(homeNeutralRef.current); // základná poloha z globálnej kalibrácie (podľa nej sa pozná otočená rukavica)
       if (recenterRef.current) {
@@ -294,7 +275,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
       applyAxisCorr(ctrl, left ? 'left' : 'right');
       ctrl.freezePose = penRef.current; // počas ťahu sa nulový bod nesmie meniť (vznikla by neviditeľná stena)
       const seqBefore = ctrl.recenterSeq;
-      const out = ctrl.update({ imu: d.imu || {}, adc: d.adc || [], ts: now } as any, dt);
+      const out = ctrl.update({ imu: d.imu || {}, adc: d.adc || [], ts: now, fingers: d.fingers } as any, dt);
       rolledRef.current = !!out.rolled;
       if (ctrl.recenterSeq !== seqBefore) {
         // kontrolér sám vynuloval náklon (rozpoznal otočenú ruku): kotva ostane pod kurzorom, aby kurzor nevyletel späť k starej kotve
@@ -313,13 +294,8 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
         }
       }
 
-      const pressed = pressedCountOf(d, cfg); // kalibrované prahy prstov (detail.fingers z WebSocketStatus)
-      let grip = pressed >= PEN_FINGERS;
-      if (grip) gripLostAtRef.current = 0;
-      else if (prevGripRef.current && pressed === PEN_FINGERS - 1) {
-        if (!gripLostAtRef.current) gripLostAtRef.current = now;
-        if (now - gripLostAtRef.current < GRIP_DROPOUT_MS) grip = true; // krátky výpadok jedného prsta: pero ostáva dole
-      } else gripLostAtRef.current = 0;
+      // stisk ruky s hysterézou (fingerCalibration.handGrip): pero ide dole pri 5 prstoch a ostáva dole, kým držia aspoň 4
+      const grip = gripOf(d, cfg);
       const releasing = !grip && prevGripRef.current;
       prevGripRef.current = grip;
 
@@ -435,6 +411,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
           follow();
         }
       }
+      recRef.current?.add(now, d, { grip, active: penRef.current, x: c.x, y: c.y, rolled: rolledRef.current });
       scheduleRender(); // vzorky chodia ~125/s, plátno sa prekreslí raz za snímku obrazovky
     };
 
@@ -482,7 +459,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
   };
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const [x, y] = mouse(e); e.currentTarget.setPointerCapture(e.pointerId);
-    cursorRef.current = { x, y, vis: true }; penDownAt(x, y); render();
+    cursorRef.current = { x, y, vis: true }; penDownAt(x, y, true); render();
   };
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.buttons !== 1 || !penRef.current) return;
@@ -532,7 +509,7 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
           </div>
         </div>
 
-        {phase === 'pick' && <div className="mb-4 flex items-center gap-3"><span className="text-slate-600">Úroveň:</span>{levelBtns}</div>}
+        {phase === 'pick' && <div className="mb-4 flex items-center gap-3 flex-wrap"><span className="text-slate-600">Úroveň:</span>{levelBtns}</div>}
         {phase === 'pick' && (
           <div className="grid grid-cols-2 gap-4 flex-1">
             {SHAPES.map((s) => (
@@ -603,13 +580,22 @@ export function ShapeTraceModal({ leftHand, onClose }: Props) {
                 <span className={`px-2.5 py-1 rounded-full ${penDown ? 'bg-green-500 text-white' : 'bg-slate-200 text-slate-600'}`}>
                   {penDown ? 'Pero dole' : 'Pero hore'}
                 </span>
+                {recordConsent && <span className="px-2.5 py-1 rounded-full bg-red-100 text-red-700">● Záznam dát</span>}
               </div>
               {result && (
-                <div className="pointer-events-none absolute right-3 top-3 bg-white/85 rounded-xl shadow-lg p-3 text-slate-700 min-w-[180px]">
-                  <div className="text-4xl font-bold text-slate-800">{result.score}<span className="text-lg"> / 100</span></div>
-                  <div className="text-sm mt-1">Presnosť: {Math.round(result.accuracy * 100)} %</div>
-                  <div className="text-sm">Pokrytie obrysu: {Math.round(result.coverage * 100)} %</div>
-                  <div className="text-sm">Rozsah pohybu: {Math.round(result.range * 100)} % tvaru</div>
+                <div className="pointer-events-none absolute right-3 top-3 bg-white/85 rounded-xl shadow-lg p-3 text-slate-700 min-w-[180px] max-w-[15rem]">
+                  {result.complete ? (
+                    <div className="text-4xl font-bold text-slate-800">{result.score}<span className="text-lg"> / 100</span></div>
+                  ) : (
+                    <>
+                      <div className="text-lg font-semibold text-amber-700">Tvar nie je dokončený</div>
+                      <div className="text-sm">Obkreslite celý obrys jedným ťahom (aspoň {Math.round(DRAW_COMPLETE_COVERAGE * 100)} %). Tento pokus sa nepočíta.</div>
+                    </>
+                  )}
+                  {result.complete && <div className="text-sm mt-1">Presnosť: {Math.round(result.accuracy * 100)} %</div>}
+                  <div className="text-sm mt-1">Pokrytie obrysu: {Math.round(result.coverage * 100)} %</div>
+                  {result.complete && <div className="text-sm">Veľkosť kresby: {sizeLabel(result.size)}</div>}
+                  {result.complete && resultMouse && <div className="text-xs text-amber-700 mt-1">Kreslené myšou – výsledok sa neukladá.</div>}
                   <div className="text-xs text-slate-500 mt-2">Stisnite prsty znova pre nový pokus.</div>
                 </div>
               )}

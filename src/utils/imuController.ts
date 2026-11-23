@@ -7,6 +7,8 @@ export type Sample = {
   imu: RawIMU;
   adc: number[];
   ts?: number;
+  /** Stav prstov z kalibrácie človeka (detail.fingers udalosti 'imu-sample'). Ak je, stisk sa berie z neho a nie zo surového ADC. */
+  fingers?: { count: number };
 };
 
 type Quat = { w: number; x: number; y: number; z: number };
@@ -84,14 +86,42 @@ export const ROLLED_PROFILE: AxisProfile = {
   gains: { right: 1, left: 1, up: 1.0, down: 1.0 },
 };
 /**
+ * 3D osi pre zvyčajnú polohu pravej rukavice (SingleIMUController.axes3d). Senzor je v rukavici natočený v priestore, nie len v rovine:
+ * zvislý pohyb zápästia má výraznú zložku okolo osi Z senzora (0,3–0,44), ktorú pôvodný model (zložky X/Y rotačného vektora otočené o 62°)
+ * zahadzoval. Osi sú priemer hlavných smerov pohybu z troch sedení (pose_20261026_085327, pose_20261102_073121, pose_20261102_110016;
+ * pose_20261026_083246 je vynechaný – pohyb do strán sa tam robil krútením predlaktia). Overenie "vynechaj jedno sedenie": bočná odchýlka
+ * 0,10 / 0,08 / 0,17 oproti 0,22 / 0,20 / 0,21 pri pôvodnom modeli. Mapa je čisto lineárna, takže nezávisí od toho, kde sa náklon vynuloval.
+ * eH/eV sú priemetové vektory (rx = rv·eH, ry = rv·eV): "vpravo" a "dole" na obrazovke.
+ */
+export const NORMAL_PROFILE: AxisProfile = {
+  roll: 52,
+  eH: [-0.567, -0.81, 0.151],
+  eV: [0.806, -0.473, 0.357],
+  gains: { right: 1, left: 1, up: 1, down: 1 },
+};
+/**
+ * Os predlaktia v súradniciach senzora (SingleIMUController.gravityAxes): os, okolo ktorej sa rukavica otočí medzi zvyčajnou a otočenou
+ * polohou. Na štyroch záznamoch pose_* (otočenie 60–88°) vyšla vždy blízko osi Z senzora; toto je ich priemer.
+ */
+export const FOREARM_AXIS: Vec3 = [-0.024, 0.173, 0.985];
+/**
  * Otočená poloha sa pozná podľa absolútneho krútenia rukavice (uhol vektora "hore" v rovine X/Y senzora, nezávislý od yaw a kalibrácie):
  * základná poloha má ~+52° (namerané 50–56°), otočená ~-6…-25°. Hranica medzi nimi je ROLLED_ROLL_MAX_DEG.
  */
 export const ROLLED_ROLL_MAX_DEG = 20;
 export const ROLLED_ROLL_MIN_DEG = -120;
-const isRolledRoll = (rollRad: number) => {
+/**
+ * Hysteréza medzi polohami: počas pohybu sa krútenie mení o desiatky stupňov a pásma sa prekrývajú (záznamy pose_*: zvyčajná poloha v pokoji
+ * 41…64°, pri pohybe dole/krúžení klesne až na 7…19°; otočená v pokoji -28…-6°, pri pohybe hore/krúžení stúpne až na 13…28°). S jedinou hranicou
+ * 20° sa preto zvyčajná poloha pri vynulovaní v náklone dole zamenila za otočenú. Do otočenej sa prejde až pod ROLLED_ENTER_DEG, späť až nad ROLLED_EXIT_DEG.
+ */
+export const ROLLED_ENTER_DEG = 5;
+export const ROLLED_EXIT_DEG = 35;
+/** Je rukavica pri tomto krútení otočená? `current` = doterajší stav (null = ešte neznámy: platí jediná hranica ROLLED_ROLL_MAX_DEG). */
+const nextRolled = (rollRad: number, current: boolean | null) => {
   const d = (rollRad * 180) / Math.PI;
-  return d < ROLLED_ROLL_MAX_DEG && d > ROLLED_ROLL_MIN_DEG;
+  if (d <= ROLLED_ROLL_MIN_DEG) return false;
+  return d < (current === null ? ROLLED_ROLL_MAX_DEG : current ? ROLLED_EXIT_DEG : ROLLED_ENTER_DEG);
 };
 
 /**
@@ -324,6 +354,7 @@ export class SingleIMUController {
   /** Doladenie otočenej polohy (len pre tento kontrolér): zosilnenie hore/dole a dodatočný bočný skos (x += k·y, y dole). Predvolene nič nemení. */
   public rolledTune: { up: number; down: number; shear: number; right?: number; left?: number; m?: [number, number, number, number] } = { up: 1, down: 1, shear: 0 };
   private stillMs = 0;     // ako dlho je ruka nehybná (na automatické rozpoznanie otočenej polohy)
+  private rolledKnown = false; // poloha už bola aspoň raz určená (potom platí hysteréza)
   private isRolled = false; // rukavica je pri poslednom recentre otočená oproti základnej polohe -> vstavané osi ROLLED_PROFILE
   private refRoll: number | null = null; // krútenie (rad) v základnej polohe z globálnej kalibrácie
   private restAz = 0;
@@ -356,6 +387,13 @@ export class SingleIMUController {
   // true = izotropný náklon (kruhová mŕtva zóna a kruhové obmedzenie, žiadne tanh po osiach),
   // takže diagonály sú rovnako dosiahnuteľné ako osi. Používa kurzor v menu/kalibrácii; hry ostávajú na false.
   public linearTilt = false;
+  // true = zvyčajná poloha pravej ruky používa 3D osi NORMAL_PROFILE namiesto otočenia o 62° + shear + gains (tie sa vtedy nepoužijú).
+  // Ľavá ruka ostáva na pôvodnom modeli (pre ňu nie sú záznamy). Otočená poloha a ručná "Kalibrácia osí" sa nemenia.
+  public axes3d = false;
+  // true = osi z gravitácie (pravá ruka): "vpravo" = otočenie okolo zvislice (smer "hore" v senzore pri vynulovaní), "dole" = otočenie okolo
+  // vodorovnej osi kolmej na predlaktie (FOREARM_AXIS). Rovnaký výpočet pre zvyčajnú aj otočenú polohu, bez vstavaných osí, shear a gains.
+  public gravityAxes = false;
+  private gravProfile: AxisProfile | null = null; // osi z gravitácie pre aktuálny nulový bod
   // Otočenie vektora náklonu (°) v rovine X/Y: senzor v rukavici je voči ruke natočený (~46°), takže pohyb doprava
   // išiel šikmo dole a hore/dole šikmo do strán. Namerané z nahrávky (zhoda všetkých 4 smerov). 0 = bez korekcie.
   public tiltRotationDeg = 0;
@@ -524,7 +562,8 @@ export class SingleIMUController {
   }
 
   private updateRolled() {
-    this.isRolled = isRolledRoll(this.restRoll);
+    this.isRolled = nextRolled(this.restRoll, this.rolledKnown ? this.isRolled : null);
+    this.rolledKnown = true;
   }
 
   /** Základná poloha rukavice (globálna kalibrácia) bez zmeny nulového bodu – podľa nej sa určí, o koľko je rukavica otočená. */
@@ -535,6 +574,11 @@ export class SingleIMUController {
 
   private setRest(q: Quat) {
     this.restQuat = q;
+    {
+      const up = upInSensor(q);
+      const eV = vUnit([up[1] * FOREARM_AXIS[2] - up[2] * FOREARM_AXIS[1], up[2] * FOREARM_AXIS[0] - up[0] * FOREARM_AXIS[2], up[0] * FOREARM_AXIS[1] - up[1] * FOREARM_AXIS[0]]);
+      this.gravProfile = { roll: 0, eH: vScale(up, -1), eV, gains: { right: 1, left: 1, up: 1, down: 1 } };
+    }
     this.restRoll = gravityAngles(q).rho;
     const pa = pointerAngles(q);
     this.restAz = pa.az;
@@ -602,10 +646,19 @@ export class SingleIMUController {
     const hpX = aX - this.lpLinAccX;
     const hpY = aY - this.lpLinAccY;
 
-        const fingers = (sample.adc || []).slice(1,5);
-    const maxGrip = fingers.length ? Math.max(...fingers.map(normalizeAdc)) : 0;
-    if (!this.gripActive && maxGrip > this.pickThreshold) this.gripActive = true;
-    else if (this.gripActive && maxGrip < this.releaseThreshold) this.gripActive = false;
+    const fingerCount = sample.fingers?.count;
+    if (typeof fingerCount === 'number') {
+      // Kalibrované prsty: stisk = aspoň 4 prsty, uvoľnenie = najviac 2 (jeden-dva prsty zopnú aj pri samotnom pohybe zápästia)
+      if (!this.gripActive && fingerCount >= 4) this.gripActive = true;
+      else if (this.gripActive && fingerCount <= 2) this.gripActive = false;
+    } else {
+      // Pôvodné pravidlo (Tetris, presúvanie blokov). Pozor: surové ADC je v tisícoch aj v pokoji, takže |adc|/128 > 0,4 platí stále
+      // a stisk je v tomto režime trvalo zapnutý – automatické rozpoznanie polohy a učenie preto bežia len s `sample.fingers`.
+      const fingers = (sample.adc || []).slice(1, 5);
+      const maxGrip = fingers.length ? Math.max(...fingers.map(normalizeAdc)) : 0;
+      if (!this.gripActive && maxGrip > this.pickThreshold) this.gripActive = true;
+      else if (this.gripActive && maxGrip < this.releaseThreshold) this.gripActive = false;
+    }
 
     const precision = this.gripActive ? this.precisionScale : 1.0;
 
@@ -616,7 +669,7 @@ export class SingleIMUController {
     this.stillMs = stillNow && !this.freezePose ? this.stillMs + dtSec * 1000 : 0;
     if (this.stillMs > 700 && !this.gripActive && imu.quat && imu.quat.w !== undefined) {
       this.stillMs = 0;
-      if (isRolledRoll(gravityAngles(imu.quat).rho) !== this.isRolled) {
+      if (nextRolled(gravityAngles(imu.quat).rho, this.isRolled) !== this.isRolled) {
         this.recenter(sample.imu); // nový nulový bod v zistenej polohe; ďalej pokračuje tento istý update
       }
     }
@@ -635,8 +688,10 @@ export class SingleIMUController {
         q = quatMultiply(this.qNeutralInv, q);
       }
       this.lastRv = rotVec(q);
-      const builtin = !this.activeProfile && this.isRolled;
-      const prof = this.activeProfile ?? (builtin ? ROLLED_PROFILE : null);
+      const gravity = !this.activeProfile && this.gravityAxes && this.screenFlipX && !!this.gravProfile; // screenFlipX = pravá ruka
+      const builtin = !this.activeProfile && this.isRolled && !gravity;
+      const normal3d = !this.activeProfile && !this.isRolled && this.axes3d && this.screenFlipX && !gravity;
+      const prof = this.activeProfile ?? (gravity ? this.gravProfile : builtin ? ROLLED_PROFILE : normal3d ? NORMAL_PROFILE : null);
       if (this.pointerTilt) {
         legacyCorr = false;
         const pa = pointerAngles(imu.quat);
@@ -658,7 +713,7 @@ export class SingleIMUController {
           ny = vy * k * precision;
         }
       } else if (prof) {
-        if (builtin) legacyCorr = false; // vstavané osi sú už zarovnané s obrazovkou: bez natočenia 46°, shear a gains
+        if (builtin || normal3d || gravity) legacyCorr = false; // vstavané osi sú už zarovnané s obrazovkou: bez natočenia, shear a gains
         // osi "vpravo" a "dole" naučené z pohybov v tejto polohe rukavice (promietnutie rotačného vektora)
         let rx: number, ry: number;
         if (prof.mx && prof.my) {

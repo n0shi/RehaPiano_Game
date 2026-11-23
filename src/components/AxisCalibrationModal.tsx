@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { sampleDt } from '../utils/sampleClock';
 import SingleIMUController from '../utils/imuController';
 import { useCalibration } from '../context/CalibrationContext';
 import {
@@ -60,7 +61,7 @@ export function AxisCalibrationModal({ leftHand, onClose }: Props) {
       const detected: HandKey | null = d.hand === 'left' ? 'left' : d.hand === 'right' ? 'right' : null;
       if (detected && detected !== handRef.current && recRef.current.dir === null) setHand(detected);
       const now = Date.now();
-      const dt = Math.max(1, now - (lastTs || now)) / 1000;
+      const dt = sampleDt(d, now - (lastTs || now)); // hodiny streamera (utils/sampleClock.ts)
       lastTs = now;
       lastSampleRef.current = now;
       const rec = recRef.current;

@@ -164,7 +164,17 @@ export class InputMapper {
     this.lastAdcPressed = cur;
   }
 
+  /**
+   * Stisk celej ruky určený hrou (kalibrované prsty človeka s hysterézou, fingerCalibration.gripOf). Bez neho platí pevný prah
+   * surového ADC (1000), ktorý kalibráciu ignoroval: otočenie a pád sa potom riadili iným stiskom než presun bloku.
+   */
+  private gripOverride: boolean | null = null;
+  setGrip(grip: boolean | null): void {
+    this.gripOverride = grip;
+  }
+
   allFingersPressed(): boolean {
+    if (this.gripOverride !== null) return this.gripOverride;
     return (
       this.lastAdcPressed.length > 0 && this.lastAdcPressed.every((p) => p)
     );

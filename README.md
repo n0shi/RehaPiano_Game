@@ -5,7 +5,7 @@
    - Súbor obsahujúci hru "Presúvanie blokov"
 - [PentominoGame.tsx](src/components/PentominoGame.tsx)
    - Súbor obsahujúci hru "Pentomino"
-- [Tetris.tsx](src/components/Tetris.tsx)
+- [TetrisGame.tsx](src/components/TetrisGame.tsx)
    - Súbor obsahujúci hru "Tetris"
 - [CalibrationModal.tsx](src/components/CalibrationModal.tsx)
    - Tento súbor obsahuje modal, ktorý sa zobrazuje len ak je pripojený WebSocket (zariadenie), Pri prvotnom spustení hry je kalibrácia nutná z dôvodu nastavenia 0 gravitačného bodu
@@ -73,7 +73,7 @@ docker compose up --build
 docker compose down
 ```
 
-Otvoríte prehliadač na http://localhost:8080
+Otvoríte prehliadač na http://localhost:8080 (`docker run` vyššie) alebo http://localhost:8082 (`docker compose`, port je v [docker-compose.yml](docker-compose.yml))
 
 Poznámky:
 - Multi-stage `Dockerfile` používa `npm run build` a kopíruje výstup `build/` do nginx.

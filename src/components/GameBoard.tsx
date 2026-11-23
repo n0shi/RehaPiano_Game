@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
+import { sampleDt } from '../utils/sampleClock';
 import { Image, Coffee } from 'lucide-react';
 import SingleIMUController from '../utils/imuController';
 import {
@@ -26,6 +27,7 @@ import { CalibrationModal } from './CalibrationModal';
 import type { AppConfig } from '../config/config';
 import { normalizeAdc, normalizeImuSample } from '../utils/imuNormalize';
 import type { FingerState } from '../utils/fingerCalibration';
+import { GloveCursor, HoldFollow } from '../utils/gloveCursor';
 
 interface GameBoardProps {
   useLeftHand: boolean;
@@ -355,7 +357,14 @@ export function GameBoard({
   const [scale, setScale] = useState<number>(1);
   
   // IMU controller
-  const imuCtrlRef = useRef<SingleIMUController | null>(null);
+  // Pohyb ruky -> kurzor ako v Pentomine (utils/gloveCursor.ts): blok ide za rukou od svojej polohy, kým je stlačený aktívny prst.
+  // Vytvára sa hneď pri prvom vykreslení, aby ho effect s neutrálnou polohou z kalibrácie už našiel (predtým vznikal až neskôr
+  // a neutrálna poloha sa do kontroléra nedostala).
+  const movedThisHoldRef = useRef(false); // blok sa v tomto stisku už pohol -> náklon sa už nevynuluje (kurzor by sa posunul voči bloku)
+  const gloveRef = useRef<GloveCursor | null>(null);
+  if (!gloveRef.current) gloveRef.current = new GloveCursor({ canGripRecenter: () => !movedThisHoldRef.current });
+  const followRef = useRef(new HoldFollow(cfg.GRID_WIDTH, cfg.GRID_HEIGHT));
+  const imuCtrlRef = useRef<SingleIMUController | null>(gloveRef.current.ctrl);
   const lastImuTsRef = useRef<number | null>(null);
   const { isCalibrated, neutralQuat, requestCalibration } = useCalibration();
   const [imuDebug, setImuDebug] = useState<any>({});
@@ -368,9 +377,6 @@ export function GameBoard({
   }, [passThroughEnabled]);
   
   // === Relatívny pohyb bloku pri stlačení prsta ===
-  const gripStartGridRef = useRef<{ x: number; y: number } | null>(null); // Pozícia ruky na začiatku
-  const gripStartBlockRef = useRef<{ x: number; y: number } | null>(null); // Pozícia bloku na začiatku
-  const wasPressingRef = useRef<boolean>(false); // Predchádzajúci stav stlačenia
 
   // Funkcia pre reštart celej hry
   function restartGame() {
@@ -396,6 +402,8 @@ export function GameBoard({
     if (imuCtrlRef.current && neutralQuat) {
       imuCtrlRef.current.calibrateNeutral(neutralQuat);
     }
+    gloveRef.current?.reset();
+    followRef.current.end();
   }, [neutralQuat]);
 
   // Sledovanie zmien stavu WebSocket pripojenia
@@ -671,15 +679,13 @@ export function GameBoard({
 
   // ------------------ Integrácia IMU / tensometra ------------------
   useEffect(() => {
-    if (!imuCtrlRef.current) {
-      imuCtrlRef.current = new SingleIMUController();
-      // Nastavenie grid size podľa konfigurácie (use GRID_WIDTH to reduce lateral sensitivity)
-      imuCtrlRef.current.gridSize = cfg.GRID_WIDTH;
-      // Tuning to reduce perceived movement speed / make smoothing stronger
-      imuCtrlRef.current.gridSmoothAlpha = 0.06; // smoother, slower-to-react
-      imuCtrlRef.current.posAlpha = 0.18; // slower pos response
-      imuCtrlRef.current.precisionScale = 1.2; // reduce precision amplification when gripping
-    }
+    // Posun bloku o jednu bunku, ak ostane v poli a (bez prechodu cez bloky) nenarazí na uložený blok
+    const tryMove = (blk: Block, dx: number, dy: number): Block | null => {
+      const nb = moveBlock(blk, dx, dy);
+      if (!isBlockInBounds(nb)) return null;
+      if (!passThroughRef.current && placedBlocksRef.current.some((p) => blocksCollide(nb, p))) return null;
+      return nb;
+    };
 
     function onSample(ev: Event) {
       if ((window as any).__modalOpen) return;
@@ -690,34 +696,11 @@ export function GameBoard({
         
         const now = Date.now();
         const last = lastImuTsRef.current ?? now;
-        const dt = Math.max(1, now - last) / 1000;
+        const dt = sampleDt(detail, now - last); // hodiny streamera (utils/sampleClock.ts)
         lastImuTsRef.current = now;
 
-        // Priprav sample pre IMU controller
-        const sample = { 
-          imu: detail.imu || {}, 
-          adc: detail.adc || [], 
-          ts: now 
-        } as any;
-
-        // Spracovanie pomocou IMU controllera
-        const out = imuCtrlRef.current!.update(sample, dt);
-
-        const imuN = normalizeImuSample(sample.imu);
-        // Aktualizácia debug dát pre kalibráciu
-        setImuDebug({
-          pitch: Math.round(imuN.pitchDeg * 10) / 10,
-          roll: Math.round(imuN.rollDeg * 10) / 10,
-          yaw: Math.round(imuN.yawDeg * 10) / 10,
-          gyro: out.gyro,
-          grip: out.grip,
-          quat: sample.imu.quatW !== undefined ? {
-            w: sample.imu.quatW ?? 0,
-            x: sample.imu.quatX ?? 0,
-            y: sample.imu.quatY ?? 0,
-            z: sample.imu.quatZ ?? 0,
-          } : undefined,
-        });
+        // fingers: kontrolér berie stisk z kalibrácie prstov (bez nich bral surové ADC a stisk bol trvalo zapnutý)
+        const sample = { imu: detail.imu || {}, adc: detail.adc || [], fingers: detail.fingers, ts: now } as any;
 
         // GRIP DETEKCIA - správne spracovanie ADC dát
         const adcArray: number[] = Array.isArray(detail.adc) ? detail.adc : [];
@@ -761,83 +744,81 @@ export function GameBoard({
         const activeNorm = normalizeAdc(activeRaw);
         const singlePressed = !grab && (calPressed ? !!calPressed[activeIdx] : (activeRaw > activeThr || activeNorm > defaultNormThr));
 
+        // Pohyb ruky -> kurzor ako v Pentomine. "Stisk" pre zmrazenie kurzora a vynulovanie náklonu = aktívny prst alebo celá ruka.
+        const hand = detail.hand === 'left' || detail.hand === 'right' ? detail.hand : useLeftHand ? 'left' : 'right';
+        const hold = singlePressed || grab;
+        if (!hold) movedThisHoldRef.current = false;
+        const st = gloveRef.current!.step({ sample, hand, hold, dt });
+        const out = st.out;
+
+        const imuN = normalizeImuSample(sample.imu);
+        // Aktualizácia debug dát pre kalibráciu
+        setImuDebug({
+          pitch: Math.round(imuN.pitchDeg * 10) / 10,
+          roll: Math.round(imuN.rollDeg * 10) / 10,
+          yaw: Math.round(imuN.yawDeg * 10) / 10,
+          gyro: out.gyro,
+          grip: out.grip,
+          quat: sample.imu.quatW !== undefined ? {
+            w: sample.imu.quatW ?? 0,
+            x: sample.imu.quatX ?? 0,
+            y: sample.imu.quatY ?? 0,
+            z: sample.imu.quatZ ?? 0,
+          } : undefined,
+        });
+
         // Aktualizovať UI stavy
         setLeftPressed(grab);
         setCurrentFingerPressed(singlePressed);
 
-        // POHYB BLOKU (RELATÍVNY): keď je stlačený jeden prst -> pohýbaj relatívne od začiatku stlačenia
+        // POHYB BLOKU: kým je stlačený aktívny prst, blok ide za rukou ako v Pentomine. Na začiatku stisku sa kurzor "položí"
+        // na blok, potom je cieľ bloku bunka pod kurzorom; blok k nej ide po bunkách (najprv vodorovne, pri prekážke zvisle),
+        // takže neprejde cez uložené bloky.
+        const follow = followRef.current;
         if (singlePressed && currentBlockRef.current) {
-          // Use unified mapping: X direct, Y inverted for left hand (consistent with Pentomino/Tetris)
-          const gridX = out.grid.x;
-          const gridY = useLeftHand ? (imuCtrlRef.current!.gridSize - 1 - out.grid.y) : out.grid.y;
-
-          // Ak začíname nové stlačenie, uložíme počiatočné pozície
-          if (!wasPressingRef.current) {
-            gripStartGridRef.current = { x: gridX, y: gridY };
-            gripStartBlockRef.current = { x: currentBlockRef.current.x, y: currentBlockRef.current.y };
-            wasPressingRef.current = true;
-          }
-
-          // Vypočítaj relatívny posun od začiatku stlačenia
-          const startGrid = gripStartGridRef.current;
-          const startBlock = gripStartBlockRef.current;
-
-          if (startGrid && startBlock) {
-            const deltaX = gridX - startGrid.x;
-            const deltaY = gridY - startGrid.y;
-            
-            // Nová pozícia bloku = počiatočná pozícia + posun
-            const targetX = Math.max(0, Math.min(cfg.GRID_WIDTH - 1, startBlock.x + deltaX));
-            const targetY = Math.max(0, Math.min(cfg.GRID_HEIGHT - 1, startBlock.y + deltaY));
-
-            // Ak sa pozícia zmenila, skús premiestniť blok
-            if (targetX !== currentBlockRef.current.x || targetY !== currentBlockRef.current.y) {
-              let newBlock = { ...currentBlockRef.current, x: targetX, y: targetY };
-              
-              // Kontrola hraníc a kolízií (respektuj pass-through režim)
-              if (
-                isBlockInBounds(newBlock) &&
-                (passThroughRef.current || !placedBlocksRef.current.some((p) => blocksCollide(newBlock, p)))
-              ) {
-                setCurrentBlock(newBlock);
-                setMovesCount((m) => m + 1);
-              }
+          if (!follow.active) {
+            follow.begin(gloveRef.current!, currentBlockRef.current.x, currentBlockRef.current.y);
+          } else {
+            const t = follow.target(st.position);
+            let blk = currentBlockRef.current;
+            for (let i = 0; t && i < 64; i++) {
+              const dx = Math.sign(t.x - blk.x), dy = Math.sign(t.y - blk.y);
+              if (!dx && !dy) break;
+              const nb = (dx ? tryMove(blk, dx, 0) : null) ?? (dy ? tryMove(blk, 0, dy) : null);
+              if (!nb) break;
+              blk = nb;
+            }
+            if (blk !== currentBlockRef.current) {
+              currentBlockRef.current = blk; // ďalšia vzorka môže prísť skôr, než sa stav prekreslí
+              movedThisHoldRef.current = true;
+              setCurrentBlock(blk);
+              setMovesCount((m) => m + 1);
             }
           }
-        } else {
-          // Prst bol uvoľnený - resetuj počiatočné pozície
-          if (wasPressingRef.current) {
-            wasPressingRef.current = false;
-            gripStartGridRef.current = null;
-            gripStartBlockRef.current = null;
-          }
+        } else if (follow.active) {
+          follow.end();
         }
 
         // ROTÁCIA: keď je 'grab' (všetky prsty) -> otáčaj podľa osi Z gyra
         const GYRO_ROTATION_THRESHOLD = 50; // deg/s
         const GYRO_ROTATION_COOLDOWN_MS = 300; // ms
-        
-        if (grab && currentBlockRef.current) {
+
+        // Jedno otočenie zápästia = jedno otočenie bloku: ďalšie až keď gyro na chvíľu klesne (gyroZWasReleased),
+        // inak by dlhšie otáčanie pri skutočných °/s otočilo blok viackrát za sebou.
+        if (grab && currentBlockRef.current && out.gyroZWasReleased) {
           if (now - lastRotationTimeRef.current >= GYRO_ROTATION_COOLDOWN_MS) {
             const gyro = out.gyro || { x: 0, y: 0, z: 0 };
-            
-            if (gyro.z > GYRO_ROTATION_THRESHOLD) {
-              const rotated = rotateBlock(currentBlockRef.current, true);
+            const dir = gyro.z > GYRO_ROTATION_THRESHOLD ? true : gyro.z < -GYRO_ROTATION_THRESHOLD ? false : null;
+            if (dir !== null) {
+              const rotated = rotateBlock(currentBlockRef.current, dir);
               if (
                 isBlockInBounds(rotated) &&
                 (passThroughRef.current || !placedBlocksRef.current.some((p) => blocksCollide(rotated, p)))
               ) {
+                currentBlockRef.current = rotated;
                 setCurrentBlock(rotated);
                 lastRotationTimeRef.current = now;
-              }
-            } else if (gyro.z < -GYRO_ROTATION_THRESHOLD) {
-              const rotated = rotateBlock(currentBlockRef.current, false);
-              if (
-                isBlockInBounds(rotated) &&
-                (passThroughRef.current || !placedBlocksRef.current.some((p) => blocksCollide(rotated, p)))
-              ) {
-                setCurrentBlock(rotated);
-                lastRotationTimeRef.current = now;
+                imuCtrlRef.current?.consumeGyroZ();
               }
             }
           }

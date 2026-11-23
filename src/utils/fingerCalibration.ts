@@ -15,10 +15,15 @@
 // Stav prstov sa počíta raz na vzorku vo WebSocketStatus a posiela sa v detail.fingers udalosti 'imu-sample'.
 
 import { normalizeAdc } from './imuNormalize';
+import { scopedKey, onUserScopeChange } from './userScope';
 
 export const FINGER_COUNT = 5; // adc[1..5]
 export type FingerHandKey = 'left' | 'right' | 'default';
-export type FingerCal = { rest: number[]; noise: number[]; motion: number[]; grip: number[]; ts: number };
+export type FingerCal = {
+  rest: number[]; noise: number[]; motion: number[]; grip: number[]; ts: number;
+  /** najnižšia hodnota prsta počas DRŽANIA stisku pri pohybe zápästia (krok 4 kalibrácie); staršie kalibrácie ju nemajú */
+  hold?: number[];
+};
 export type FingerState = {
   /** stlačené prsty v poradí kanálov adc[1..5] */
   pressed: boolean[];
@@ -28,6 +33,8 @@ export type FingerState = {
   /** 0..1: kde leží prah zopnutia na stupnici `level` */
   onLevel: number[];
   calibrated: boolean;
+  /** stisk celej ruky s hysterézou (pozri handGrip): začne pri 5 prstoch, drží pri 4, krátko aj pri 3 */
+  grip: boolean;
 };
 
 const STORAGE_KEY = 'rehapiano.fingerCal.v1';
@@ -39,6 +46,12 @@ const MIN_RANGE = 250;            // menší rozdiel stisk − pokoj sa považuj
 const DRIFT_ALPHA = 1 / (125 * 20); // ~20 s časová konštanta pri 125 Hz
 const DRIFT_LIMIT = 0.25;
 const DRIFT_ZONE = 0.15;          // dolaďuje sa len pod rest + 15 % rozsahu
+// Držanie stisku: pohyb zápästia pri zatvorenej ruke mení napätie tenzometrov a jednotlivé prsty krátko klesnú pod prah uvoľnenia
+// (pri kreslení sa tým ťah trhal). Preto (1) prah uvoľnenia každého prsta leží pod jeho najnižšou hodnotou nameranou pri držaní
+// stisku v pohybe (cal.hold) a (2) stisk ruky drží, kým sú stlačené aspoň 4 prsty; 3 prsty sa tolerujú GRIP_DROPOUT_MS.
+const HOLD_MARGIN = 0.12;         // prah uvoľnenia = (najnižšia hodnota pri držaní) − 12 % rozsahu
+const OFF_FRAC_MIN = 0.08;        // nikdy nie nižšie (šum a drift pokoja)
+export const GRIP_DROPOUT_MS = 250;
 
 export const handKeyOf = (hand: unknown): FingerHandKey => (hand === 'left' || hand === 'right' ? hand : 'default');
 
@@ -46,7 +59,7 @@ let cache: Partial<Record<FingerHandKey, FingerCal>> | null = null;
 function readAll(): Partial<Record<FingerHandKey, FingerCal>> {
   if (cache) return cache;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(scopedKey(STORAGE_KEY));
     cache = raw ? JSON.parse(raw) : {};
   } catch {
     cache = {};
@@ -67,9 +80,9 @@ export function loadFingerCal(hand: unknown): FingerCal | null {
 export function saveFingerCal(hand: unknown, cal: FingerCal) {
   const key = handKeyOf(hand);
   cache = { ...readAll(), [key]: cal };
-  runtime[key] = undefined; // nový prah, nová hysteréza a drift od nuly
+  runtime[key] = undefined; gripRuntime[key] = undefined; // nový prah, nová hysteréza a drift od nuly
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));
+    localStorage.setItem(scopedKey(STORAGE_KEY), JSON.stringify(cache));
   } catch {
     // bez localStorage platí kalibrácia aspoň do obnovenia stránky
   }
@@ -79,7 +92,7 @@ export function clearFingerCal(hand?: unknown) {
   const all = { ...readAll() };
   if (hand === undefined) { cache = {}; for (const k of Object.keys(runtime)) runtime[k as FingerHandKey] = undefined; }
   else { delete all[handKeyOf(hand)]; cache = all; runtime[handKeyOf(hand)] = undefined; }
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cache)); } catch { /* ignore */ }
+  try { localStorage.setItem(scopedKey(STORAGE_KEY), JSON.stringify(cache)); } catch { /* ignore */ }
 }
 
 /** Prahové hodnoty pre jeden prst z kalibrácie (bez driftu). */
@@ -88,7 +101,12 @@ export function fingerThreshold(cal: FingerCal, i: number) {
   const range = Math.max(1, cal.grip[i] - rest);
   const motionFrac = Math.max(0, cal.motion[i] - rest) / range;
   const onFrac = Math.min(ON_FRAC_MAX, Math.max(ON_FRAC_MIN, motionFrac + MOTION_MARGIN));
-  return { rest, range, onFrac, offFrac: onFrac * OFF_RATIO, reliable: cal.grip[i] - rest >= Math.max(MIN_RANGE, 6 * cal.noise[i]) };
+  let offFrac = onFrac * OFF_RATIO;
+  const hold = cal.hold?.[i];
+  if (typeof hold === 'number' && Number.isFinite(hold)) {
+    offFrac = Math.max(OFF_FRAC_MIN, Math.min(offFrac, (hold - rest) / range - HOLD_MARGIN));
+  }
+  return { rest, range, onFrac, offFrac, reliable: cal.grip[i] - rest >= Math.max(MIN_RANGE, 6 * cal.noise[i]) };
 }
 
 /** Pôvodné pevné pravidlo (bez kalibrácie). */
@@ -102,20 +120,44 @@ export function legacyPressed(v: number, cfg?: any) {
 type Runtime = { pressed: boolean[]; drift: number[] };
 const runtime: Partial<Record<FingerHandKey, Runtime>> = {};
 
+type GripRuntime = { grip: boolean; lowSince: number };
+const gripRuntime: Partial<Record<FingerHandKey, GripRuntime>> = {};
+
+// Kalibrácia je uložená pre každého používateľa zvlášť: pri zmene používateľa sa zahodí načítaná kalibrácia aj rozpracovaný stav prstov
+onUserScopeChange(() => {
+  cache = null;
+  for (const k of Object.keys(runtime)) runtime[k as FingerHandKey] = undefined;
+  for (const k of Object.keys(gripRuntime)) gripRuntime[k as FingerHandKey] = undefined;
+});
+/** Stisk celej ruky z počtu stlačených prstov: začne pri všetkých 5, drží pri 4, pri 3 ešte GRIP_DROPOUT_MS, pri 2 a menej končí hneď. */
+function handGrip(key: FingerHandKey, count: number, now: number): boolean {
+  const g = (gripRuntime[key] ??= { grip: false, lowSince: 0 });
+  if (!g.grip) { if (count >= FINGER_COUNT) { g.grip = true; g.lowSince = 0; } return g.grip; }
+  if (count >= FINGER_COUNT - 1) g.lowSince = 0;
+  else if (count === FINGER_COUNT - 2) {
+    if (!g.lowSince) g.lowSince = now;
+    if (now - g.lowSince >= GRIP_DROPOUT_MS) g.grip = false;
+  } else g.grip = false;
+  if (!g.grip) g.lowSince = 0;
+  return g.grip;
+}
+
 /**
  * Stav prstov pre jednu vzorku. Má stav (hysteréza, drift), preto sa volá raz na vzorku – robí to WebSocketStatus.
  * Hry čítajú výsledok z detail.fingers (pozri pressedCountOf / pressedOf).
  */
-export function detectFingers(adc: unknown, hand: unknown, cfg?: any): FingerState {
+export function detectFingers(adc: unknown, hand: unknown, cfg?: any, now: number = Date.now()): FingerState {
   const arr = Array.isArray(adc) ? adc : [];
   const vals = Array.from({ length: FINGER_COUNT }, (_, i) => Number(arr[i + 1]) || 0);
   const cal = loadFingerCal(hand);
   if (!cal) {
     const pressed = vals.map((v) => legacyPressed(v, cfg));
     const thr = Math.min(cfg?.TENSOMETER_RAW_THRESHOLD ?? 2000, (cfg?.TENSOMETER_NORM_THRESHOLD ?? 12) * 128);
+    const count = pressed.filter(Boolean).length;
     return {
-      pressed, count: pressed.filter(Boolean).length,
+      pressed, count,
       level: vals.map((v) => Math.min(1, Math.abs(v) / (thr * 2))), onLevel: vals.map(() => 0.5), calibrated: false,
+      grip: handGrip(handKeyOf(hand), count, now),
     };
   }
   const key = handKeyOf(hand);
@@ -135,7 +177,15 @@ export function detectFingers(adc: unknown, hand: unknown, cfg?: any): FingerSta
     level.push(Math.max(0, Math.min(1, frac)));
     onLevel.push(t.onFrac);
   }
-  return { pressed: [...rt.pressed], count: rt.pressed.filter(Boolean).length, level, onLevel, calibrated: true };
+  const count = rt.pressed.filter(Boolean).length;
+  return { pressed: [...rt.pressed], count, level, onLevel, calibrated: true, grip: handGrip(key, count, now) };
+}
+
+/** Stisk celej ruky zo vzorky (detail udalosti 'imu-sample'); bez detail.fingers platí pôvodné pravidlo: všetkých 5 prstov. */
+export function gripOf(detail: any, cfg?: any): boolean {
+  const f = detail?.fingers as FingerState | undefined;
+  if (f && typeof f.grip === 'boolean') return f.grip;
+  return pressedCountOf(detail, cfg) >= FINGER_COUNT;
 }
 
 /** Počet stlačených prstov zo vzorky (detail udalosti 'imu-sample'); ak chýba detail.fingers, pôvodné pevné pravidlo. */
@@ -161,7 +211,7 @@ const quantile = (a: number[], q: number) => {
 };
 
 /** rest/motion/grip: zoznamy vzoriek, každá = 5 hodnôt adc[1..5]. */
-export function computeFingerCal(rest: number[][], motion: number[][], grip: number[][]): FingerCal {
+export function computeFingerCal(rest: number[][], motion: number[][], grip: number[][], hold: number[][] = []): FingerCal {
   const col = (rows: number[][], i: number) => rows.map((r) => r[i]);
   const out: FingerCal = { rest: [], noise: [], motion: [], grip: [], ts: Date.now() };
   for (let i = 0; i < FINGER_COUNT; i++) {
@@ -172,6 +222,7 @@ export function computeFingerCal(rest: number[][], motion: number[][], grip: num
     out.noise.push(Math.max(1, 1.4826 * quantile(r.map((v) => Math.abs(v - restMed)), 0.5)));
     out.motion.push(motion.length ? quantile(col(motion, i), 0.95) : restMed);
     out.grip.push(quantile(col(grip, i), 0.5)); // medián držania: konzervatívny odhad sily stisku
+    if (hold.length) (out.hold ??= []).push(quantile(col(hold, i), 0.1)); // takmer najnižšia hodnota pri držaní v pohybe
   }
   return out;
 }

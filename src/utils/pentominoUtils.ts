@@ -112,6 +112,44 @@ export function findNearestValidPosition(
   return best;
 }
 
+/**
+ * Štartovacie miesto pre blok, ktorý ho v leveli nemá (alebo ho má mimo poľa / cez iný blok): prvé voľné miesto od ľavého
+ * horného rohu. Najprv hľadá miesto mimo cieľového tvaru s medzerou jednej bunky od cieľa aj ostatných blokov, potom mimo
+ * cieľa bez medzery a nakoniec kdekoľvek, kde sa blok zmestí. null = pole je plné.
+ */
+export function findStartPosition(
+  grid: boolean[][],
+  pieceGrid: boolean[][],
+  targetShape: boolean[][]
+): { row: number; col: number } | null {
+  const rows = grid.length, cols = grid[0]?.length || 0;
+  const ok = (row: number, col: number, margin: number, avoidTarget: boolean) => {
+    if (!fitsOnGrid(grid, pieceGrid, row, col)) return false;
+    if (!avoidTarget) return true;
+    for (let r = 0; r < pieceGrid.length; r++) {
+      for (let c = 0; c < pieceGrid[r].length; c++) {
+        if (!pieceGrid[r][c]) continue;
+        for (let dr = -margin; dr <= margin; dr++) {
+          for (let dc = -margin; dc <= margin; dc++) {
+            const tr = row + r + dr, tc = col + c + dc;
+            if (targetShape[tr]?.[tc]) return false;
+            if (margin && grid[tr]?.[tc]) return false;
+          }
+        }
+      }
+    }
+    return true;
+  };
+  for (const [margin, avoidTarget] of [[1, true], [0, true], [0, false]] as const) {
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        if (ok(row, col, margin, avoidTarget)) return { row, col };
+      }
+    }
+  }
+  return null;
+}
+
 // Umiestnenie kúska na mriežku
 export function placePiece(
   grid: boolean[][],

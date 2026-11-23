@@ -12,7 +12,10 @@ export type RawIMU = {
 // Euler angles (pitch/roll/yaw) already arrive in degrees -> no scaling.
 // (Dividing by 16 shrank the range to ~-11..11 and broke thresholds.)
 export const ANGLE_DIVISOR = 1;
-// Gyro: raw -1034..+1144 / 16 -> realistic -64.6..+71.5 deg/s (confirmed on real data).
+// Gyro: súčasný streamer posiela gyro UŽ v °/s (tools/monitor.py), preto Pentomino, menu, kreslenie, kalibrácia osí aj
+// "Presúvanie blokov" nastavujú SingleIMUController.gyroDivisor = 1. Deliteľ 16 je pozostatok staršieho streamera (surové
+// jednotky) a ostáva predvolený len kvôli Tetrisu: jeho InputMapper (tetris/imu/utils.ts -> scaleGyro) má prah otočenia
+// 18 naladený na takto zmenšené hodnoty (~290 °/s skutočnej rýchlosti). Pri zmene treba prah v TetrisGame vynásobiť 16.
 export const GYRO_DIVISOR = 16;
 export const LINACC_DIVISOR = 100;
 export const GRAV_DIVISOR = 100;
